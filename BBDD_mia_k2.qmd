@@ -1,0 +1,656 @@
+---
+title: "K2 Mikulski Archive"
+author: "Leo Rodríguez"
+toc: true
+toc-depth: 4
+toc-location: left
+format: html
+editor: visual
+self-contained: true
+---
+
+# Librerias
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(readxl)
+```
+
+# Lectura de datos
+
+```{r}
+datosk2 <- read_excel("k2pandc_excel.xlsx")
+```
+
+# Depuración de variables
+
+En este apartado se eliminarán las variables completamente vacias, con datos erroneos o consideradas inservibles.
+
+Voy a crear unos vectores con las variables numéricas y categóricas ya que tal vez me ayude en el análisis futuro
+
+```{r}
+listconti <- c("sy_snum", "sy_pnum", 
+"sy_mnum", "pl_orbper", 
+"pl_orbsmax", "pl_rade", "pl_radj", "pl_masse", "pl_massj", "pl_msinie", 
+"pl_msinij", "pl_cmasse", "pl_cmassj", "pl_bmasse", "pl_bmassj", "pl_dens", "pl_orbeccen", "pl_insol", "pl_eqt","pl_orbincl", "pl_tranmid", "pl_imppar", "pl_trandep", "pl_trandur", "pl_ratdor", "pl_ratror", "pl_occdep", "pl_orbtper", "pl_orblper", "pl_rvamp", "pl_projobliq", "pl_trueobliq","st_teff", "st_rad", "st_mass", "st_met", "st_logg", "st_age", "st_dens", "st_lum","st_vsin", "st_rotp", "st_radv", "ra","dec", "glat", "glon", "elat", "elon", "sy_pm", "sy_pmra","sy_pmdec", "sy_dist", "sy_plx", "sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", "sy_icmag", "sy_tmag", "sy_kepmag", "pl_nnotes", "k2_campaigns_num", "st_nphot", "st_nrvc", "st_nspec", "pl_nespec", "pl_ntranspec", "pl_ndispec") #variables 0,1 son categoricas. ESTA MAL
+listdiscr <- setdiff(colnames(datosk2), listconti)
+listdiscr <- listdiscr[listdiscr != "disposition"]
+
+vble_dependiente <- "disposition"
+```
+
+```{r}
+#confirmamos que sea un DF
+datosk2 <- as.data.frame(datosk2)
+
+summary(datosk2)
+```
+
+::: callout-warning
+Hay planetas repetidos, que tienen valores distintos en otras variables debido al refinamiento de las medidas en años posteriores, por tanto, nos quedaremos con las filas que tengan un valor de 1 en *default_flag*.
+:::
+
+En la siguiente celda, cogemos los datos con los datos recomendados por la NASA, agrupados por pl_name, de tal forma que nos quedará un dataset con un planeta por fila.
+
+```{r}
+datosk2_original <- datosk2 #mantengo el dataframe original
+
+datosk2 <- datosk2 %>%
+  group_by(pl_name) %>%
+  filter(default_flag == 1)
+
+#comparamos las bases de datos:
+n_distinct(datosk2_original$pl_name)
+n_distinct(datosk2$pl_name)
+```
+
+
+Finalmente encontramos que tenemos 1803 observaciones únicas.
+
+```{r}
+#variables completamente inútiles
+columnas_a_eliminar <- c("sy_mnum", "cb_flag", "pul_flag", "ptv_flag","ast_flag", "obm_flag", "etv_flag", "ima_flag", 
+"dkin_flag","pl_msinie","pl_msinij", "pl_cmasse", "pl_cmassj","pl_dens", "pl_orbeccen", "pl_insol", "pl_eqt", 
+"pl_orbincl","pl_imppar","pl_occdep", "pl_orbtper", "pl_orblper", "pl_rvamp", "pl_projobliq", "pl_trueobliq", 
+"st_lum","st_age", "st_dens", "st_vsin", "st_rotp", "st_radv","sy_icmag")
+
+#elimino las columnas que no quiero
+datosk2 <- datosk2 %>% select(-all_of(columnas_a_eliminar))
+```
+
+# Selección de variables
+
+## Nombres
+
+Como podemos ver, la base de datos tiene 129 variables, tras un estudio sobre el significado de las variables vamos a proceder a eliminar las variables NO marcadas en negrita:
+
+1.  **pl_name (Planet Name)**: Nombre predeterminado del archivo de exoplanetas para planetas confirmados.
+
+2.  **hostname (Host Name)**: Nombre de la estrella más comúnmente utilizado en la literatura.
+
+3.  pl_letter (Planet Letter)**: Letra asignada al componente planetario de un sistema planetario.
+
+4.  k2_name (K2 ID)**: Nombre asignado por el archivo de exoplanetas para los planetas descubiertos por K2.
+
+5.  epic_hostname (EPIC Name)**: Nombre de la estrella según el catálogo EPIC.
+
+6.  hd_name (HD ID)**: Nombre de la estrella según el catálogo Henry Draper.
+
+7.  hip_name (HIP ID)**: Nombre de la estrella según el catálogo Hipparcos.
+
+8.  tic_id (TESS Input Catalog ID)**: Nombre de la estrella según el catálogo de entrada de TESS.
+
+9.  gaia_id (Gaia DR2 ID)**: Nombre de la estrella según el catálogo Gaia.
+
+10. **default_flag (Default Parameter Set)**: Indicador booleano que señala si el conjunto de parámetros del planeta ha sido seleccionado como predeterminado (1=sí, 0=no).
+
+11. **disposition (Archive Disposition)**: Disposición actualizada por el archivo de exoplanetas. Los valores actuales son:
+
+    -   CANDIDATE (CANDIDATO),
+    -   FALSE POSITIVE (FALSO POSITIVO),
+    -   CONFIRMED (CONFIRMADO),
+    -   REFUTED (REFUTADO). Todos los candidatos marcados como CONFIRMED también se encuentran en la tabla de sistemas planetarios del archivo de exoplanetas.
+
+12. disp_refname (Archive Disposition Reference)**: Nombre de la referencia de la publicación de donde se obtiene la disposición del archivo.
+
+```{r}
+str(datosk2[,1:14])
+```
+
+Como podemos observar, las estrellas tienen varios nombres según distintos parámetros. Actualemente no nos importa más que uno, por tanto, generaré un segundo DataFrame que contenga las variables de los nombres de las estrellas junto al KepID por si en algún momento necesito fusionarlo con el DataFrame de trabajo.
+
+Las variables que serán movidas al nuevo DataFrame se presentan a continuación:
+
+```{r}
+data_nombreEstrella <- datosk2[,c("pl_name","epic_hostname","pl_letter","k2_name",
+"epic_candname", "hd_name", "hip_name", "tic_id", "gaia_id", "disp_refname")] 
+
+columnas_a_eliminar <- c("epic_hostname","pl_letter","k2_name",
+"epic_candname", "hd_name", "hip_name", "tic_id", "gaia_id","disp_refname")
+
+#elimino las columnas que no quiero
+datosk2 <- datosk2 %>% select(-all_of(columnas_a_eliminar))
+```
+
+A continuación vamos a mirar si las variables han sido guardadas correctamente
+
+```{r}
+str(datosk2[,1:4])
+```
+
+Damos el visto bueno al almacenamiento de las variables
+
+## Composicion del sistema
+
+1.  **sy_snum (Number of Stars)**: Número de estrellas en el sistema planetario.
+
+2.  **sy_pnum (Number of Planets)**: Número de planetas confirmados en el sistema planetario.
+
+3.  sy_mnum (Number of Moons)**: Número de lunas en el sistema planetario.
+
+4.  cb_flag (Circumbinary Flag)**: Indicador de si el planeta orbita un sistema binario (1=sí, 0=no).
+
+Las variables de este bloque vamos a mantenerlas todas, ya que pueden servirnos en el análisis futuro
+
+```{r}
+str(datosk2[,5:6])
+```
+
+Como podemos ver, estan clasificadas como numéricas lo que es perfecto.
+
+## Descubrimiento de planetas
+
+1.  **discoverymethod (Discovery Method)**: Método por el cual se identificó por primera vez el planeta confirmado o el candidato.
+
+2.  **disc_year (Discovery Year)**: Año en que se descubrió el planeta confirmado o el candidato.
+
+3.  disc_refname (Discovery Reference)**: Nombre de la referencia de la publicación donde se describe el descubrimiento.
+
+4.  disc_pubdate (Discovery Publication Date)**: Fecha de publicación de la referencia del descubrimiento del planeta confirmado o el candidato.
+
+5.  **disc_locale (Discovery Locale)**: Ubicación de la observación del descubrimiento del planeta confirmado o el candidato (terrestre o espacial).
+
+6.  **disc_facility (Discovery Facility)**: Nombre de la instalación donde se realizaron las observaciones del descubrimiento del planeta confirmado o el candidato.
+
+7.  **disc_telescope (Discovery Telescope)**: Nombre del telescopio utilizado en las observaciones del descubrimiento.
+
+8.  disc_instrument (Discovery Instrument)**: Nombre del instrumento utilizado en las observaciones del descubrimiento.
+
+En este bloque tampoco nos interesan todas las variables. Eliminaremos las siguientes variables: disc_refname, disc_pubdate, disc_facility y disc_instrument
+
+```{r}
+str(datosk2[7:14])
+```
+
+```{r}
+columnas_a_eliminar <- c("disc_refname", "disc_pubdate", "disc_instrument")
+
+#guardo los datos que voy a eliminar del DF original
+data_nombreEstrella <- cbind(
+  data_nombreEstrella, 
+  datosk2[, columnas_a_eliminar])
+
+
+#elimino las columnas que no quiero
+datosk2 <- datosk2 %>% select(-all_of(columnas_a_eliminar))
+```
+
+A continuación comprobamos que los datos estan bien almacenados
+
+```{r}
+str(datosk2[,7:11])
+```
+
+## Detecciones
+
+1.  **rv_flag (Detections by Radial Velocity Variations)**: Indicador de si la estrella anfitriona del planeta exhibe variaciones de velocidad radial debido al planeta (1=sí, 0=no).
+
+2.  pul_flag (Detected by Pulsar Timing Variations)**: Indicador booleano que señala si la estrella anfitriona del planeta exhibe variaciones de sincronización del púlsar debido al planeta (1=sí, 0=no).
+
+3.  ptv_flag (Detected by Pulsation Timing Variations)**: Indicador booleano que señala si la estrella anfitriona del planeta exhibe variaciones de sincronización por pulsaciones debido al planeta (1=sí, 0=no).
+
+4.  **tran_flag (Detected by Transits)**: Indicador de si el planeta transita su estrella anfitriona (1=sí, 0=no).
+
+5.  ast_flag (Detected by Astrometric Variations)**: Indicador de si la estrella anfitriona del planeta exhibe variaciones astrométricas debido al planeta (1=sí, 0=no).
+
+6.  obm_flag (Detected by Orbital Brightness Modulations)**: Indicador de si el planeta exhibe modulaciones orbitales en la curva de fase (1=sí, 0=no).
+
+7.  **micro_flag (Detected by Microlensing)**: Indicador booleano que señala si el sistema planetario actuó como lente en un evento de microlente observado (1=sí, 0=no).
+
+8.  etv_flag (Detected by Eclipse Timing Variations)**: Indicador de si un planeta circumbinario que orbita un sistema binario eclipsante induce variaciones de sincronización de eclipses (ETV) en el par binario (1=sí, 0=no).
+
+9.  ima_flag (Detected by Imaging)**: Indicador de si el planeta ha sido observado mediante técnicas de imagen (1=sí, 0=no).
+
+10. dkin_flag (Detection by Disk Kinematics)**: Indicador booleano que señala si la presencia del planeta fue inferida debido a su influencia cinemática en el disco protoplanetario de su estrella anfitriona (1=sí, 0=no).
+
+11. **soltype (Solution Type)**: Disposición del planeta según el conjunto de parámetros planetarios especificado.
+
+12. **pl_controv_flag (Controversial Flag)**: Indicador de si el estado de confirmación de un planeta ha sido cuestionado en la literatura publicada (1=sí, 0=no).
+
+Las variables de este bloque parecen ser más interesantes, de momento vamos a guardarlas todas hasta ver que como interactuan con el futuro análisis.
+
+```{r}
+str(datosk2[,12:16])
+```
+
+Todas las variables han sido codificadas correctamente.
+
+## Parámetros del planeta
+
+1.  pl_refname (Planetary Parameter Reference)**:
+    -   Referencia de la publicación usada para el conjunto de parámetros planetarios.
+2.  **pl_orbper (Orbital Period \[días\])**:
+    -   Tiempo que tarda el candidato en completar una órbita alrededor de la estrella o sistema anfitrión.
+3.  **pl_orbsmax (Orbit Semi-Major Axis \[ua\])**:
+    -   eje mayor de la órbita elípitca o para exoplanetas detectados mediante mircrolente gravitacional o imágen directa, la separación proyectada.
+4.  **pl_rade (Candidate Radius \[radios terrestres\])**:
+    -   Distancia desde el centro del candidato hasta su superficie, en unidades de radio de la Tierra.
+5.  pl_radj (Candidate Radius \[radios de Júpiter\])**:
+    -   Distancia desde el centro del candidato hasta su superficie, en radios de Júpiter.
+6.  pl_masse (Planet Mass \[masas terrestres\])**:
+    -   Cantidad de materia contenida en el planeta
+7.  **pl_massj (Planet Mass \[masas de Júpiter\])**:
+    -   Cantidad de materia contenida en el planeta, medida en masas de Júpiter.
+8.  pl_msinie (Planet Mass\*sin(i) \[masas terrestres\])**:
+    -   Masa mínima de un planeta medida por velocidad radial (en masas terrestres).
+9.  pl_msinij (Planet Mass\*sin(i) \[masas de Júpiter\])**
+    -   Masa mínima de un planeta medida por velocidad radial (en masas de Júpiter).
+10. pl_cmasse (Planet Mass\*sin(i)/sin(i) \[masas terrestres\])**
+    -   Cantidad calculada como cociente del límite inferior de la masa, denotado como mada \* sen(inclinación) entre el sen (inclinación). En masas terrestres
+11. pl_cmassj (Planet Mass\*sin(i)/sin(i) \[masas de Júpiter\])**:
+    -   Similar a la anterior, en masas de Júpiter.
+
+**ATENCIÓN**, las dos variables arriba descritas solo se usan en contextos en las que las referencias no proporcionan la masa real del planeta pero sí su inclinación y su límite de masa.
+
+12. pl_bmasse (Planet Mass or Mass\*sin(i) \[masas terrestres\])**:
+    -   Mejor estimación disponible de masa del planeta, entre: masa, masa \*sin(inclinación)/sen(inclinación) ó masa \*sen(inclinación) en orden de preferencia. En unidades de masa terrestre
+13. **pl_bmassj (Planet Mass or Mass\*sin(i) \[masas de Júpiter\])**:
+    -   Lo mismo que la anterior, pero en unidades de Júpiter.
+14. **pl_bmassprov (Planet Mass or Mass\*sin(i) Provenance)**:
+    -   Procedencia de la medida de la mejor masa.
+15. pl_dens (Planet Density \[g/cm³\])**:
+    -   Densidad del planeta (masa por unidad de volumen) en $\frac{g}{cm^3}$
+16. pl_orbeccen (Eccentricity)**:
+    -   Grado en el que la órbita del planeta se desvía de un círculo perfecto
+17. pl_insol (Insolation Flux \[Flujo de Insolación en unidades terrestres\])**:
+    -   Flujo de insolación. En unidades relativas a las medidas de la Tierra con el Sol. Es una forma de ver la temperatura de equilibrio
+18. pl_eqt (Equilibrium Temperature \[K\])**:
+    -   Temperatura de equilibrio del candidato, modelada por un cuerpo negro calentado solo por su estrella anfitriona, para candidatos detectados por imágen directa, la temperatura efectiva del candidato requerida para que coincida con la luminosidad si el candidato fuere un cuerpo negro
+19. pl_orbincl (Inclination \[grados\])**:
+    -   Distancia angular del plano orbital desde la línea de visión.
+20. **pl_tranmid (Time of Conjunction \[punto medio de tránsito en días\])**:
+    -   Promedio del inicio y fin del tránsito del candidato por el disco estelar.
+21. **pl_tsystemref (Time Reference Frame and Standard)**:
+    -   Base del sistema temporal para parámetros orbitales y temporales.
+22. **ttv_flag (Transit Timing Variations)**:
+    -   booleano, indica si la órbita del planeta muestra variaciones en el tiempo de tránsito debido a otro planeta en el sistema (1=sí, 0=no).
+23. pl_imppar (Impact Parameter)**:
+    -   Distancia proyectada en el cielo entre el centro del disco estelar y el centro del disco del candidato durante el tránsito, normalizada por el radio estelar.
+24. **pl_trandep (Transit Depth \[%\])**:
+    -   Magnitud de la disminución relativa del flujo causada por el tránsito del objeto frente a la estrella.
+25. **pl_trandur (Transit Duration \[horas\])**:
+    -   Duración desde el el momento en el que el candidato empieza a crizar la estrella hasta que termina
+26. pl_ratdor (Ratio of Distance to Stellar Radius)**:
+    -   Relación (ratio) entre el semieje mayor y el radio de la estrella.
+27. pl_ratror (Ratio of Planet to Stellar Radius)**:
+    -   Relación (ratio) entre el radio del candidato y el radio de la estrella.
+28. pl_occdep (Occultation Depth \[%\])**:
+    -   Profundidad de la ocultación durante un eclipse secundario.
+29. pl_orbtper (Epoch of Periastron \[grados\])**:
+    -   Tiempo del paso del planeta por el periastro.
+30. pl_orblper (Argument of Periastron \[grados\])**:
+    -   Separación angular entre el nodo ascendente de la órbita y el periastro.
+31. pl_rvamp (Radial Velocity Amplitude \[m/s\])**:
+    -   La mitad de la amplitud máxima de variación en la velocidad radial estelar.
+32. pl_projobliq (Projected Obliquity \[grados\])**:
+    -   Ängulo entre el vector del momento angular de la estrella anfitriona y el vector de la órbita del planeta, proectado al plano del cielo.
+33. pl_trueobliq (True Obliquity \[grados\])**:
+    -   Ängulo entre el vector del momento angular de la estrella anfitriona y el vector de la órbita del planeta
+
+```{r}
+str(datosk2[,17:33])
+```
+
+En este grupo de variables encontramos muchas que no nos sirven para el análisis posterior, ya sea por que son variables iguales (miden lo mismo en distintas unidades de medida) o por que son variables inservibles para lo que nos ocupa
+
+```{r}
+columnas_a_eliminar <- c("pl_refname", "pl_radj", "pl_masse", "pl_bmasse", "pl_ratdor", "pl_ratror")
+
+#guardo los datos que voy a eliminar del DF original
+data_nombreEstrella <- cbind(
+  data_nombreEstrella, 
+  datosk2[, columnas_a_eliminar])
+
+
+#elimino las columnas que no quiero
+datosk2 <- datosk2 %>% select(-all_of(columnas_a_eliminar))
+```
+
+```{r}
+str(datosk2[,17:27])
+```
+
+
+## Datos estelares
+
+1.  st_refname (Stellar Parameter Reference)**: Referencia de la publicación usada para el conjunto de parámetros estelares.
+
+2.  **st_spectype (Spectral Type)**: Clasificación de la estrella basada en sus características espectrales según el sistema Morgan-Keenan.
+
+3.  **st_teff (Effective Temperature \[K\])**:
+
+    -   Temperatura de la estrella modelada como un cuerpo negro que emite la misma cantidad total de radiación electromagnética.
+
+4.  **st_rad (Stellar Radius \[Solar radii\])**:
+
+    -   Longitud del segmento desde el centro de la estrella hasta su superficie, medida en unidades de radio del Sol.
+
+5.  **st_mass (Stellar Mass \[Solar mass\])**:
+
+    -   Cantidad de materia contenida en la estrella, medida en unidades de masas solares.
+
+6.  st_met (Stellar Metallicity \[dex\])**:
+
+    -   Medida del contenido metálico de la fotosfera de la estrella en comparación con el contenido de hidrógeno.
+
+7.  **st_metratio (Metallicity Ratio)**: Relación del contenido metálico, donde \[Fe/H\] indica la abundancia de hierro y \[M/H\] se refiere al contenido metálico general.
+
+8.  st_lum (Stellar Luminosity \[log(Solar)\])**:
+
+    -   Cantidad de energía emitida por una estrella por unidad de tiempo, medida en luminosidades solares.
+
+9.  **st_logg (Stellar Surface Gravity)**:
+
+    -   Aceleración gravitacional experimentada en la superficie de la estrella.
+
+10. st_age (Stellar Age \[Gyr\])**:
+
+    -   Edad de la estrella anfitriona del planeta, en miles de millones de años.
+
+11. st_dens (Stellar Density \[g/cm³\])**:
+
+    -   Cantidad de masa por unidad de volumen de la estrella.
+
+12. st_vsin (Rotational Velocity v\*sin(i) \[km/s\])**:
+
+    -   Velocidad de rotación en el ecuador de la estrella multiplicada por el seno de la inclinación.
+
+13. st_rotp (Stellar Rotational Period \[days\])**:
+
+    -   Tiempo requerido para que la estrella anfitriona del planeta complete una rotación (suponiendo que es un cuerpo sólido).
+
+14. st_radv (Systemic Radial Velocity \[km/s\])**:
+
+    -   Velocidad de la estrella en la dirección de la línea de visión.
+
+```{r}
+str(datosk2[,28:35])
+```
+
+En este grupo de variables vamos a eliminar la variable de referencia a las publicaciones por los mismos motivos de siempre.
+
+```{r}
+
+columnas_a_eliminar <- c("st_refname")
+
+#guardo los datos que voy a eliminar del DF original
+data_nombreEstrella <- cbind(
+  data_nombreEstrella, 
+  datosk2[, columnas_a_eliminar])
+
+
+#elimino las columnas que no quiero
+datosk2 <- datosk2 %>% select(-all_of(columnas_a_eliminar))
+```
+
+```{r}
+str(datosk2[,28:34])
+```
+
+## Datos del sistema
+
+1.  sy_refname (System Parameter Reference)**:
+    -   Referencia de la publicación usada para el conjunto de parámetros del sistema.
+2.  **sy_pm (Total Proper Motion \[mas/año\])**:
+    -   Cambio angular en la posición con el tiempo visto desde el centro de masa del Sistema Solar.
+3.  **sy_pmra (Proper Motion (RA) \[mas/año\])**:
+    -   Cambio angular en la ascensión recta con el tiempo visto desde el centro de masa del Sistema Solar.
+4.  **sy_pmdec (Proper Motion (Dec) \[mas/año\])**:
+    -   Cambio angular en la declinación con el tiempo visto desde el centro de masa del Sistema Solar.
+5.  **sy_dist (Distance \[pc\])**:
+    -   Distancia al sistema planetario en unidades de parsecs.
+6.  **sy_plx (Parallax \[mas\])**:
+    -   Diferencia en la posición angular de una estrella medida en dos posiciones opuestas dentro de la órbita de la Tierra.
+7.  pl_nnotes (Number of Notes)**:
+    -   Número de notas asociadas con el planeta. Las notas pueden verse en la página de visión general del sistema del objeto.
+8.  **k2_campaigns (K2 Campaigns)**:
+    -   Las campañas específicas de K2 en las cuales se observó el objetivo K2.
+9.  **k2_campaigns_num (Number of K2 Campaigns)**:
+    -   Número de campañas de K2 en las cuales se observó el objetivo K2.
+
+```{r}
+str(datosk2[,c(35,38,39,40,41,42,63,64,65)])
+```
+
+En este bloque hay variables que tampoco nos van a servir para el posterior análisis
+
+```{r}
+columnas_a_eliminar <- c("sy_refname","pl_nnotes")
+#guardo los datos que voy a eliminar del DF original
+data_nombreEstrella <- cbind(
+  data_nombreEstrella, 
+  datosk2[, columnas_a_eliminar])
+
+
+#elimino las columnas que no quiero
+datosk2 <- datosk2 %>% select(-all_of(columnas_a_eliminar))
+```
+
+```{r}
+str(datosk2[,c(37,38,39,40,41,63,64)])
+```
+
+## Posicion (subset de Datos del sistema)
+
+1.  rastr (RA \[sexagesimal\])**:
+    -   Ascensión recta del sistema planetario en formato sexagesimal.
+2.  decstr (Dec \[sexagesimal\])**:
+    -   Declinación del sistema planetario en notación sexagesimal.
+3.  **ra (RA \[decimal\])**:
+    -   Ascensión recta del sistema planetario en grados decimales.
+4.  **dec (Dec \[decimal\])**:
+    -   Declinación del sistema planetario en grados decimales.
+5.  glat (Galactic Latitude \[grados\])**:
+    -   Latitud galáctica del sistema planetario en unidades de grados decimales.
+6.  glon (Galactic Longitude \[grados\])**:
+    -   Longitud galáctica del sistema planetario en unidades de grados decimales.
+7.  elat (Ecliptic Latitude \[grados\])**:
+    -   Latitud eclíptica del sistema planetario en unidades de grados decimales.
+8.  elon (Ecliptic Longitude \[grados\])**:
+    -   Longitud eclíptica del sistema planetario en unidades de grados decimales.
+
+```{r}
+str(datosk2[,35:42])
+```
+
+En este grupo de variables, todas miden la posición del planeta, por tanto, para eliminar la repetición de datos nos quedaremos solo con las vriables *ra* y *dec*
+
+```{r}
+columnas_a_eliminar <- c("rastr", "decstr", "glat", "glon", "elat", "elon")
+#guardo los datos que voy a eliminar del DF original
+data_nombreEstrella <- cbind(
+  data_nombreEstrella, 
+  datosk2[, columnas_a_eliminar])
+
+
+#elimino las columnas que no quiero
+datosk2 <- datosk2 %>% select(-all_of(columnas_a_eliminar))
+```
+
+```{r}
+str(datosk2[,35:36])
+```
+
+## Fotometria (Subset de datos del sistema)
+
+1.  **sy_bmag**: Brillo de la estrella anfitriona medido usando la banda B (Johnson) en unidades de magnitudes.
+
+2.  **sy_vmag**: Brillo de la estrella anfitriona medido usando la banda V (Johnson) en unidades de magnitudes.
+
+3.  **sy_jmag**: Brillo de la estrella anfitriona medido usando la banda J (2MASS) en unidades de magnitudes.
+
+4.  **sy_hmag**: Brillo de la estrella anfitriona medido usando la banda H (2MASS) en unidades de magnitudes.
+
+5.  **sy_kmag**: Brillo de la estrella anfitriona medido usando la banda Ks (2MASS) en unidades de magnitudes.
+
+6.  **sy_umag**: Brillo de la estrella anfitriona medido usando la banda u (Sloan) en unidades de magnitudes.
+
+7.  **sy_gmag**: Brillo de la estrella anfitriona medido usando la banda g (Sloan) en unidades de magnitudes.
+
+8.  **sy_rmag**: Brillo de la estrella anfitriona medido usando la banda r (Sloan) en unidades de magnitudes.
+
+9.  **sy_imag**: Brillo de la estrella anfitriona medido usando la banda i (Sloan) en unidades de magnitudes.
+
+10. **sy_zmag**: Brillo de la estrella anfitriona medido usando la banda z (Sloan) en unidades de magnitudes.
+
+11. **sy_w1mag**: Brillo de la estrella anfitriona medido usando la banda WISE 3.4um en unidades de magnitudes.
+
+12. **sy_w2mag**: Brillo de la estrella anfitriona medido usando la banda WISE 4.6um en unidades de magnitudes.
+
+13. **sy_w3mag**: Brillo de la estrella anfitriona medido usando la banda WISE 12um en unidades de magnitudes.
+
+14. **sy_w4mag**: Brillo de la estrella anfitriona medido usando la banda WISE 22um en unidades de magnitudes.
+
+15. **sy_gaiamag**: Brillo de la estrella anfitriona medido usando la banda Gaia en unidades de magnitudes.
+
+16. sy_icmag**: Brillo de la estrella anfitriona medido usando la banda I (Cousins) en unidades de magnitudes.
+
+17. **sy_tmag**: Brillo de la estrella anfitriona medido usando la banda TESS en unidades de magnitudes.
+
+18. **sy_kepmag**: Brillo de la estrella anfitriona medido usando la banda Kepler en unidades de magnitudes.
+
+```{r}
+str(datosk2[,42:58])
+```
+
+## Fechas (subset de datos del sistema)
+
+1.  **rowupdate**: Fecha de la última actualización de los parámetros del planeta.
+
+2.  **pl_pubdate**: Fecha de publicación del conjunto de parámetros planetarios dado.
+
+3.  **releasedate**: Fecha en la que el conjunto de parámetros planetarios fue publicado públicamente por el Archivo de Exoplanetas de la NASA.
+
+```{r}
+str(datosk2[,59:61])
+```
+
+::: callout-warging
+Estos datos estan codificados como caracteres pero son fechas, a lo mejor es necesario el uso de TIBBLE
+:::
+
+## Datos adicionales
+
+1.  **st_nphot**: Número de registros de series temporales de fotometría, incluyendo curvas de luz de tránsito planetario, curvas de luz de tránsito general y curvas de luz de aficionados.
+
+2.  **st_nrvc**: Número de curvas de velocidad radial provenientes de la literatura disponibles para esta estrella en el Archivo de Exoplanetas de la NASA.
+
+3.  **st_nspec**: Número de espectros estelares provenientes de la literatura disponibles para esta estrella en el Archivo de Exoplanetas de la NASA.
+
+4.  **pl_nespec**: Número de mediciones de espectros de eclipses provenientes de la literatura para este planeta en el Archivo de Exoplanetas de la NASA.
+
+5.  **pl_ntranspec**: Número de mediciones de espectros de transmisión provenientes de la literatura para este planeta en el Archivo de Exoplanetas de la NASA.
+
+6.  **pl_ndispec**: Número de mediciones de espectros de imágenes directas provenientes de la literatura para este planeta en el Archivo de Exoplanetas de la NASA.
+
+```{r}
+str(datosk2[,62:69])
+```
+
+## Guardar el DataSet
+
+En esta celda, guardamos los datos en un archivo Rdata, para poder cargarlo en otros archivos o incluso partir desde este punto de trabajo
+
+```{r}
+setwd("C:/Users/rodri/Desktop/Estadística_Leo/tfg/exoplanetas/BBDD_explicando")
+save(datosk2, file = "datosk2.RData")
+```
+
+## Checkpoint
+```{r}
+load("datosk2.Rdata")
+```
+
+
+## Creación de listas
+
+```{r}
+#guardamos las variables en listas
+listconti2 <- names(datosk2)[sapply(datosk2, is.numeric)]
+print(listconti2)
+
+listdiscr2 <- setdiff(colnames(datosk2), listconti2)
+listdiscr2 <- listdiscr2[listdiscr2 != "disposition"]
+print(listdiscr2)
+```
+
+## convertir a Factores
+```{r}
+datosk2[,listdiscr2] <- lapply(datosk2[,listdiscr2],as.factor)
+datosk2 <- as.data.frame(datosk2)
+```
+
+## retención de clasificados
+
+```{r}
+candidatos <- datosk2 |>  filter(disposition == "CANDIDATE") #aquellos con los que haremos predicciones a futuro
+datosk2_completo <- datosk2 |> filter(disposition != "CANDIDATE") #aquellos con los que entrenaremos el modelo
+```
+
+```{r}
+datosk2_completo$dummy_disposition <- ifelse(datosk2_completo$disposition == "CONFIRMED", 1,
+                        ifelse(datosk2_completo$disposition %in% c("FALSE POSITIVE", "REFUTED"), 0, NA))
+datosk2_completo$dummy_disposition <- as.factor(datosk2_completo$dummy_disposition)
+summary(datosk2_completo)
+```
+
+## selección de variables que se usarán
+
+```{r}
+vblesverdes <- c("pl_name","discoverymethod", "disc_locale", "disc_facility", 
+"disc_telescope", "pl_orbper", "pl_rade", "pl_tranmid", "ttv_flag", 
+"pl_trandep", "pl_trandur", "pl_tsystemref","st_spectype", "st_teff", "st_rad",
+"st_mass", "st_met", "st_metratio", "st_logg", "sy_pm", 
+"sy_pmra", "sy_pmdec", "sy_dist", "sy_bmag", "sy_vmag", 
+"sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", 
+"sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", 
+"sy_gaiamag", "sy_tmag", "sy_kepmag","dummy_disposition")
+data_modelos <- datosk2_completo[,vblesverdes]
+data_modelos <- as.data.frame(data_modelos)
+```
+
+## actualización de las listas
+
+```{r}
+listconti3 <- c( "pl_orbper", "pl_rade",
+"pl_tranmid", "pl_trandep", "pl_trandur", 
+ "st_teff", "st_rad", "st_mass", "st_met","st_logg", "sy_pm", "sy_pmra", "sy_pmdec", "sy_dist","sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", 
+"sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", 
+"sy_w3mag", "sy_w4mag", "sy_gaiamag", "sy_tmag", "sy_kepmag")
+listdiscr3 <- setdiff(colnames(data_modelos), listconti3)
+listdiscr3 <- listdiscr3[listdiscr3 != "pl_name"] #No queremos que el nombre este en las listas de discretas
+listdiscr3 <- listdiscr3[listdiscr3 != "dummy_disposition"] #no queremos que la vble dependiente este en las listas
+```
+
+```{r}
+data_modelos[,listdiscr3] <- lapply(data_modelos[,listdiscr3],as.factor)
+str(data_modelos)
+```
+
+# Almacenamiento de los datos
+
+```{r}
+setwd("C:/Users/rodri/Desktop/Estadística_Leo/tfg/exoplanetas/BBDD_explicando")
+save(data_modelos, file = "datosDepurados.RData")
+```

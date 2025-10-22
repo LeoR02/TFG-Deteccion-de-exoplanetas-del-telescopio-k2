@@ -1,0 +1,1390 @@
+---
+title: "Análisis descriptivo (EDA)"
+author: "Leo Rodríguez"
+toc: true
+toc-depth: 4
+toc-location: left
+format: html
+editor: visual
+self-contained: true
+---
+
+# Librerias
+
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2) #gráficos
+library(tidyr) #datos tidy
+library(patchwork) #pegar gráficos
+library(dplyr)
+library(forcats)
+library(vcd) #mosaico
+library(RColorBrewer) #colores en visualizaciones
+library(astrolibR) 
+library(lsr) #test V de Cramer
+library(knitr) #tablas bonitas
+library(kableExtra) #tablas
+library(webshot2) #guardar tablas
+library(gt) #tablas tambien
+library(magick)
+library(car) #leveneTest
+library(corrplot)
+```
+
+# Funciones y paletas
+
+```{r}
+#Paletas disponibles:
+#par(mar=c(3,4,2,2))
+#display.brewer.all()
+#####
+
+#Blues -> secuencial
+#Dark2 -> cualitativas
+#Spectral -> chocantes
+#-----------
+#Paleta chocante
+colores_spectral <- brewer.pal(11,"Spectral")
+colores_paleta_spectral <- list(
+  Exoplaneta = colores_spectral[8],
+  noExoplaneta = colores_spectral[3],
+  puntos = colores_spectral[6]
+)
+
+# Paleta "continua"
+colores_brewer <- brewer.pal(n = 7, name = "Blues")
+# Asignar colores a elementos
+colores_paleta <- list(
+  histograma = colores_brewer[4],
+  boxplot = colores_brewer[2],
+  outlier = colores_brewer[3]
+)
+```
+
+A continuación se plantean dos funciones que imprimen y guardan los gráficos que se van a usar para las variables continuas primero y para las variables categóricas después.
+
+```{r}
+funcion_descriptivos <- function(data, variables, output_dir = ".") {
+  for (var in variables) {
+    
+    histo <- ggplot(data, aes(x = .data[[var]])) +
+      geom_histogram(bins = 50, fill = colores_paleta$histograma, color = "black") +
+      theme_minimal() +
+      labs(title = paste("Histograma de", var), x = var, y = "Frecuencia")
+
+    box <- ggplot(data, aes(y = .data[[var]])) +
+      geom_boxplot(fill = colores_paleta$boxplot, outlier.color = colores_paleta$outlier) +
+      theme_minimal() +
+      labs(title = paste("Boxplot de", var), y = var)
+    
+    # Juntar con patchwork
+    combinado <- histo / box + plot_layout(heights = c(2, 1)) 
+    
+    #imprimir en pantalla
+    print(combinado)
+    ggsave(
+      filename = file.path(output_dir, paste0(var, ".jpg")),
+      plot = combinado,
+      width = 8, height = 6, dpi = 300
+    )
+    
+    message(paste("Gráfico guardado como", var, ".jpg"))
+  }
+}
+
+
+dir.create("graficos_planetas", showWarnings = FALSE) #creo una carpeta donde guardo los gráficos
+
+```
+
+```{r}
+graficar_categoricas_horizontal_v2 <- function(data, variables, output_dir = ".",  top_n = 10, colores_barras = brewer.pal(9,"Set1")[2]) {
+  dir.create(output_dir, showWarnings = FALSE)
+  
+  for (var in variables) {
+    data[[var]] <- as.factor(data[[var]])
+    
+    if (nlevels(data[[var]]) > top_n) {
+      data[[var]] <- fct_lump(data[[var]], n = top_n, other_level = "Otros")
+    }
+    
+    df_plot <- data %>%
+      count(!!sym(var)) %>%
+      mutate(
+        prop = n / sum(n) * 100,
+        etiqueta = paste0(round(prop, 1), "%"),
+        posicion = ifelse(prop > 5, "outside", "inside")  
+      )
+    
+    df_plot[[var]] <- fct_reorder(df_plot[[var]], df_plot$n)
+    
+    p <- ggplot(df_plot, aes(x = !!sym(var), y = n)) +
+      geom_bar(stat = "identity", fill = colores_barras, color = "black") +
+      geom_text(
+        aes(label = etiqueta, hjust = 0.000001),
+        size = 3.2,
+      ) +
+      coord_flip() +
+      theme_minimal() +
+      labs(
+        title = paste("Frecuencia de", var),
+        x = NULL,
+        y = "Frecuencia"
+      ) +
+      theme(
+        axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(size = 9),
+        plot.margin = margin(10, 30, 10, 10)
+      ) +
+      expand_limits(y = max(df_plot$n) * 1.1) 
+    
+    print(p)
+    
+    ggsave(
+      filename = file.path(output_dir, paste0(var, ".jpg")),
+      plot = p,
+      width = 9, height = 6.5, dpi = 300
+    )
+    
+    message(paste("Gráfico guardado como", var, ".jpg"))
+  }
+}
+
+```
+
+```{r}
+generar_tablas_gt <- function(data, variables, carpeta = ".") {
+  
+  for (var in variables) {
+    resumen <- data %>%
+      summarise(
+        Mínimo = min(.data[[var]], na.rm = TRUE),
+        Mediana = median(.data[[var]], na.rm = TRUE),
+        Media = mean(.data[[var]], na.rm = TRUE),
+        Máximo = max(.data[[var]], na.rm = TRUE),
+        Desviación = sd(.data[[var]], na.rm = TRUE),
+        Nas = as.integer(sum(is.na(.data[[var]])))
+      ) %>%
+      pivot_longer(cols = everything(), names_to = "Estadístico", values_to = "Valor") %>%
+      mutate(Valor = ifelse(Valor %% 1 == 0, as.integer(Valor), Valor))
+    
+    tabla_gt <- resumen %>%
+      gt()%>%
+    fmt_number(
+    columns = everything(),
+    drop_trailing_zeros = TRUE
+  ) 
+
+   nombre_archivo <- file.path(carpeta, paste0("tabla_gt_", var, ".png"))
+   gtsave(tabla_gt, filename = nombre_archivo)
+    
+    message("Guardada: ", nombre_archivo)
+  }
+}
+```
+
+```{r}
+generar_tablas_frecuencia_gt <- function(data, variables, carpeta = ".") {
+  
+  for (var in variables) {
+    # Crear tabla de frecuencia
+    tabla <- data %>%
+      count(.data[[var]]) %>%
+      mutate(Proporción = round(n / sum(n), 3)) %>%
+      rename(Categoría = 1, Frecuencia = n)
+
+    # Crear tabla gt
+    tabla_gt <- tabla %>%
+      gt() %>%
+      fmt_percent(columns = Proporción, decimals = 1) %>%
+      cols_label(Proporción = "Proporción (%)")
+
+    # Guardar como imagen
+    nombre_archivo <- file.path(carpeta, paste0("frecuencia_gt_", var, ".png"))
+    gtsave(tabla_gt, filename = nombre_archivo)
+
+    message("Guardada: ", nombre_archivo)
+  }
+}
+```
+
+# Carga de datos
+
+```{r}
+load("datosDepurados.Rdata")
+str(data_modelos)
+```
+
+## listas de variables
+
+```{r}
+# Convertir a factor con etiquetas claras
+data_modelos$dummy_disposition <- factor(data_modelos$dummy_disposition, 
+                              levels = c(0,1),
+                              labels = c("No Exoplaneta", "Exoplaneta"))
+```
+
+```{r}
+#lista de vbles continuas:
+listconti3 <- c( "pl_orbper", "pl_rade",
+"pl_tranmid", "pl_trandep", "pl_trandur", 
+ "st_teff", "st_rad", "st_mass", "st_met","st_logg", "sy_pm", "sy_pmra", "sy_pmdec", "sy_dist","sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", 
+"sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", 
+"sy_w3mag", "sy_w4mag", "sy_gaiamag", "sy_tmag", "sy_kepmag")
+
+#lista de vbles discretas;
+listdiscr3 <- setdiff(colnames(data_modelos), listconti3)
+
+#quitamos el nombre, lo consideramos una "key"
+listdiscr3 <- listdiscr3[listdiscr3 != "pl_name"]
+
+#quitamos la vble dependiente
+listdiscr3 <- listdiscr3[listdiscr3 != "dummy_disposition"]
+vble_dependiente <- "dummy_disposition"
+```
+
+# Normalidad de los datos
+
+Para estudiar la normalidad en los datos vamos a realiar el test de shapiro-wilk:
+
+$H_0: \text{la variable sigue una distribución normal}$
+
+$H_1: \text{la variable no sigue una distribución normal}$
+```{r}
+# Creamos un data.frame para guardar los resultados
+res_shapiro <- data.frame(
+  variable = listconti3,
+  p_value  = NA_real_,
+  normalidad = NA_character_,
+  stringsAsFactors = FALSE
+)
+
+# Bucle para aplicar el test a cada variable
+for (v in listconti3) {
+  shapiro_test <- shapiro.test(data_modelos[[v]])  # Aplicamos el test a la variable
+  res_shapiro[res_shapiro$variable == v, "p_value"] <- shapiro_test$p.value
+  res_shapiro[res_shapiro$variable == v, "normalidad"] <- ifelse(shapiro_test$p.value > 0.05, "Normal", "No Normal")
+}
+
+# Vista rápida de los resultados
+print(res_shapiro)
+```
+
+# Homogeneidad en las varianzas
+
+Para estudiar la homogeneidad en las varianzas haremos el test de Levene
+
+$H_0: \text{varianzas iguales entre grupos}$
+
+$H_1: \text{varianzas distintas entre grupos}$
+
+```{r}
+res_levene <- data.frame(
+  variable = listconti3,
+  p_value  = NA_real_,
+  significación = NA_character_,
+  stringsAsFactors = FALSE
+)
+
+for (v in listconti3) {
+  levene_test <- leveneTest(as.formula(paste(v, "~ dummy_disposition")), data = data_modelos)
+  res_levene[res_levene$variable == v, "p_value"] <- levene_test$`Pr(>F)`[1]
+  res_levene[res_levene$variable == v, "significación"] <- ifelse(levene_test$`Pr(>F)`[1] < 0.01, "***", ifelse(levene_test$`Pr(>F)`[1] < 0.05, "**", "-"))
+}
+
+print(res_levene)
+```
+
+Como vemos la mayoria de variables no cumplen el supuesto de homogeneidad de varianzas.
+
+# Análisis ANOVA
+
+Voy a realizar un test ANOVA para ver si existen diferencias significativas entre las medias de las distribuciones entre cada variables predictora y dummy_disposition en caso de 0 y 1.
+
+:::{.callout.important}
+El test ANOVA asume
+
+- normalidad en las variables
+
+- homogeneidad en las varianzas
+:::
+$H_0: \nexists \;\text{difrenrencias significativas entre los grupos}$
+
+$H_1: \exists \;\text{difrenrencias significativas entre los grupos}$
+
+Como hemos comprobado anteriormente, los datos no cumplen ni el supuesto de normalidad ni el de homogeneidad de varianzas, por tanto, realizaremos el test no parámetrico de Kruskal-Wallis. Este test una alternativa al análisis de la varianza que compara las medianas en vez de las medias.
+
+$H_0: \text{las variables tienen la misma tendencia central}$
+
+$H_1: \text{las variables no tienen la misma tendencia central}$
+
+```{r}
+res_anova <- data.frame(
+  variable = listconti3,
+  Estadistico  = NA_real_,
+  p_value  = NA_real_,
+  significación= NA_real_,
+  stringsAsFactors = FALSE
+)
+
+for (v in listconti3) {
+  fit <- kruskal.test(as.formula(paste(v, "~ dummy_disposition")), data = data_modelos)
+
+  kruskal <- kruskal.test(as.formula(paste(v, "~ dummy_disposition")), data = data_modelos)
+  
+  res_anova[res_anova$variable == v, "Estadistico"] <- kruskal$p.value
+  res_anova[res_anova$variable == v, "p_value"] <- kruskal$statistic[[1]]
+  res_anova[res_anova$variable == v, "significación"] <- ifelse(res_anova[res_anova$variable == v, "p_value"] < 0.01, "***", ifelse(res_anova[res_anova$variable == v, "p_value"] < 0.05, "**","-")) 
+}
+
+print(res_anova)
+
+```
+
+# Chi cuadrado
+```{r, eval=FALSE}
+
+res_chisq <- data.frame(
+  variable = listdiscr3,
+  Chi2      = NA_real_,
+  p_value   = NA_real_,
+  significación = NA_real_,
+  stringsAsFactors = FALSE
+)
+
+for (v in listdiscr3) {
+  tab <- table(data_modelos[[v]], data_modelos$dummy_disposition)
+  test <- stats::chisq.test(tab)
+  res_chisq[res_chisq$variable == v, "Chi2"]    <- unname(test$statistic)
+  res_chisq[res_chisq$variable == v, "p_value"] <- test$p.value
+  res_chisq[res_chisq$variable == v, "significación"] <- ifelse(res_chisq[res_chisq$variable == v, "p_value"] < 0.01, "***",ifelse( res_chisq[res_chisq$variable == v, "p_value"] <0.05, "**", "-"))
+}
+
+print(res_chisq)
+
+```
+
+# Análisis exploratorio
+
+## Continuo
+
+### Parámetros del planeta
+
+Las variables que miden magnitudes espaciales suelen tener valores poco intuitivos, vamos a echarlo un vistazo a las variables
+
+#### pl_trandep
+
+```{r}
+summary(data_modelos$pl_trandep)
+```
+
+Estos datos no tienen sentido, ya que la variable *pl_trandep* mide porcentajes, entiendo que en algún momento se han sumado ceros a la variable sin querer.
+
+A continuación transformo la variable en sus valores correctos bajo la revisión del dataframe inicial y mediante un table(), para encontrar en que punto comienza el error. Cotejandolo con DataFrame original del Exoplanet Archive, en el que observamos que aquellos valores mayores a uno son los que han sufrido el cambio.
+
+```{r}
+data_modelos$pl_trandep<-ifelse(data_modelos$pl_trandep > 1, data_modelos$pl_trandep/1e8, data_modelos$pl_trandep)
+summary(data_modelos$pl_trandep)
+```
+
+Ahora los datos sí que tienen sentido (salvando outlilers o errores cometidos en la base de datos original)
+
+#### pl_orbper
+
+```{r}
+summary(data_modelos$pl_orbper)
+```
+
+Al igual que antes, estos datos no tienen sentido, la variable *pl_orbper* mide días, por tanto revisando el DataFrame original transformamos la variable
+
+```{r}
+data_modelos$pl_orbper<-ifelse(data_modelos$pl_orbper > 1, data_modelos$pl_orbper/1e11, data_modelos$pl_orbper)
+summary(data_modelos$pl_orbper)
+```
+
+La variable ahora sí contiene los valores correctos.
+
+#### pl_rade
+
+```{r}
+summary(data_modelos$pl_rade)
+```
+
+En esta variable encontramos el mismo problema, la variable *pl_rade* mide el radio del planeta observado en radios terrestres.
+
+Transformamos la variable
+
+```{r}
+data_modelos$pl_rade<-ifelse(data_modelos$pl_rade > 1, data_modelos$pl_rade/1e8, data_modelos$pl_rade)
+summary(data_modelos$pl_rade)
+```
+
+::: callout-warning
+El planeta "EPIC 210789323,01", guardado en la fila 67, tiene 205 radios terrestres y Jupiter tiene 11. Hay que controlar si es un outlier o un error.
+:::
+
+#### pl_tranmid
+
+```{r}
+summary(data_modelos$pl_tranmid)
+```
+
+Encontramos el mismo error en esta variable, *pl_tranmid* mide días.
+
+Transformamos la variable
+
+```{r}
+data_modelos$pl_tranmid<-ifelse(data_modelos$pl_tranmid > 1, data_modelos$pl_tranmid/1e8, data_modelos$pl_tranmid)
+summary(data_modelos$pl_tranmid)
+```
+
+::: callout-note
+Antes de continuar, vamos a estandarizar los datos de la variable *pl_tranmid* ya que viene referida a la variable *pl_tsystemref*, que nos indica en que sistema de tiempo ha sido medida la variable.
+
+| Abreviatura | Significado | Uso |
+|------------------------|------------------------|------------------------|
+| JD | Julian Date | General |
+| HJD | Heliocentric Julian Day | Corrige según el movimiento de la tierra |
+| BJD | Barycentric Julian Date | Corrige según el movimiento del centro de masa del sistema |
+| BJD-TBD | BJD pero en escala TBD | mayor precisión en estudios orbitales |
+:::
+
+```{r}
+data_modelos$pl_tranmid_std <- with(data_modelos, case_when(
+  pl_tsystemref == "JD" ~ pl_tranmid + 0.0008,       # como 70s
+  pl_tsystemref == "HJD" ~ pl_tranmid + 0.0005,      # más o menos 43s
+  pl_tsystemref == "BJD" ~ pl_tranmid,               
+  pl_tsystemref == "BJD-TDB" ~ pl_tranmid,           # Ya está bien
+  TRUE ~ NA_real_                                    # Para NA's
+))
+summary(data_modelos$pl_tranmid_std)
+summary(data_modelos$pl_tranmid)
+
+```
+
+::: callout-note
+Se ha estandarizado la fecha media del tránsito (pl_tranmid) al sistema BJD-TDB, aplicando correcciones aproximadas para sistemas menos precisos como JD y HJD. Esta transformación mejora la comparabilidad entre observaciones. Como resultado, algunos valores no corregibles (por falta de referencia temporal) han sido marcados como NA, lo que ha aumentado el número total de valores faltantes de 74 a 118.
+:::
+
+Vamos a eliminar las variables que no necesitamos
+
+```{r}
+data_modelos$pl_tsystemref <- NULL
+data_modelos$pl_tranmid <- NULL
+listdiscr3 <- setdiff(listdiscr3,"pl_tsystemref")
+listconti3 <- setdiff(listconti3,"pl_tranmid")
+listconti3 <- c(listconti3, "pl_tranmid_std")
+```
+
+#### pl_trandur
+
+```{r}
+summary(data_modelos$pl_trandur)
+```
+
+Mismo problema, la variable *pl_trandur* mide horas.
+
+Transformamos la variable
+
+```{r}
+data_modelos$pl_trandur<-ifelse(data_modelos$pl_trandur > 1, data_modelos$pl_trandur/1e7, data_modelos$pl_trandur)
+summary(data_modelos$pl_trandur)
+```
+
+```{r, warning=FALSE}
+funcion_descriptivos(data = data_modelos,
+                     c("pl_orbper","pl_rade","pl_tranmid_std","pl_trandep","pl_trandur"),
+                     output_dir = "graficos_planetas")
+```
+
+### Datos estelares
+
+#### st_teff
+
+```{r}
+summary(data_modelos$st_teff)
+```
+
+Esta variable sí está bien guardada.
+
+:::{.callout-note}
+
+las enanas rojas \~ 2500K,
+
+las estrellas tipo Sol \~ 5800K y
+
+las estrellas tipo O \~30000K
+:::
+
+#### st_rad
+
+```{r}
+summary(data_modelos$st_rad)
+```
+
+Podemos observar, que esta variable también está mal codificada, con ayuda de table() vemos que se han multiplicado los valores mayores que uno.
+
+Reconvertimos la variable:
+
+```{r}
+data_modelos$st_rad <- ifelse(data_modelos$st_rad > 1, data_modelos$st_rad/1e6, data_modelos$st_rad)
+summary(data_modelos$st_rad)
+```
+
+#### st_mass
+
+```{r}
+summary(data_modelos$st_mass)
+```
+
+En este caso, nos pasa lo mismo.
+
+```{r}
+data_modelos$st_mass <- ifelse(data_modelos$st_mass > 1, data_modelos$st_mass/1e6, data_modelos$st_mass)
+summary(data_modelos$st_mass)
+```
+
+#### st_met
+
+```{r}
+summary(data_modelos$st_met)
+```
+
+En este caso, con ayuda de table(), vemos que los valores menores a -1 son los que han sufrido cambios.
+
+```{r}
+data_modelos$st_met <- ifelse(data_modelos$st_met < -1, data_modelos$st_met/1e4, data_modelos$st_met)
+summary(data_modelos$st_met)
+```
+
+#### st_logg
+
+```{r}
+summary(data_modelos$st_logg)
+```
+
+En este caso, ocurre lo mismo con los números mayores a 1
+
+```{r}
+data_modelos$st_logg <- ifelse(data_modelos$st_logg > 1, data_modelos$st_logg/1e6, data_modelos$st_logg)
+summary(data_modelos$st_logg)
+```
+
+### Datos del sistema
+
+#### sy_pm
+
+```{r}
+summary(data_modelos$sy_pm)
+```
+
+Otra vez, encontramos el error con table(). y lo solucionamos.
+
+```{r}
+data_modelos$sy_pm <- ifelse(data_modelos$sy_pm > 1, data_modelos$sy_pm/1e7, data_modelos$sy_pm)
+summary(data_modelos$sy_pm)
+```
+
+#### sy_pmra
+
+```{r}
+summary(data_modelos$sy_pmra)
+```
+
+Otra vez, encontramos el error con table() y vemos que en este caso es para aquellos valores menores que -1 y para los valores mayores a 1.
+
+```{r}
+data_modelos$sy_pmra<- ifelse(data_modelos$sy_pmra > 1 | data_modelos$sy_pmra < -1 , data_modelos$sy_pmra/1e7, data_modelos$sy_pmra)
+summary(data_modelos$sy_pmra)
+```
+
+::: callout-warning
+Observar ese 900 milisegundas de arco por año, puede ser cierto para estrellas cercanas, revisar
+:::
+
+#### sy_pmdec
+
+```{r}
+summary(data_modelos$sy_pmdec)
+```
+
+Mismo error
+
+```{r}
+data_modelos$sy_pmdec<- ifelse(data_modelos$sy_pmdec > 1 | data_modelos$sy_pmdec < -1 , data_modelos$sy_pmdec/1e7, data_modelos$sy_pmdec)
+summary(data_modelos$sy_pmdec)
+```
+
+#### sy_dist
+
+```{r}
+summary(data_modelos$sy_dist)
+```
+
+Mismo error, para los valores mayores que 1
+
+```{r}
+data_modelos$sy_dist<- ifelse(data_modelos$sy_dist > 1, data_modelos$sy_dist/1e8, data_modelos$sy_dist)
+summary(data_modelos$sy_dist)
+```
+
+### Fotometria
+
+```{r}
+# Lista de variables a recorrer
+variables <- c("sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", 
+"sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", 
+"sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", 
+"sy_tmag","sy_kepmag")
+
+for (i in variables) {
+  cat("Summary para", i, ":\n")
+  print(summary(data_modelos[[i]]))
+  cat("\n") 
+}
+```
+
+Como podemos ver, para todas las variables, excepto para kepmag, el error es de $1·10^7$ unidades, en el caso del kepmag es de $1000$ unidades. Por tanto, para agilizar el trabajo vamos a hacer un bucle que solucione el error para cada variable, kepmag se abordará de manera solitaria.
+
+```{r}
+variables2 <- c("sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", 
+"sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", 
+"sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", 
+"sy_tmag")
+
+for(var in variables2){
+  data_modelos[[var]] <- ifelse(data_modelos[[var]] > 1, data_modelos[[var]]/1e7,data_modelos[[var]])
+}
+
+for (var in variables2) {
+  cat("Valores actualizados para", var, ":\n")
+  print(summary(data_modelos[[var]]))  # Muestra los primeros valores como ejemplo
+  cat("\n")
+}
+
+```
+
+```{r}
+data_modelos$sy_kepmag <- ifelse(data_modelos$sy_kepmag > 1, data_modelos$sy_kepmag/1000, data_modelos$sy_kepmag)
+```
+
+```{r}
+summary(data_modelos$sy_kepmag)
+```
+
+::: callout-warning
+Cuidado con las variables sy_rmag, sy_umag y sy_gmag, tienen valores de 30, probablemente placeholders para objetos no detectados Valores \> 25 podrian representar valores censurados
+:::
+
+```{r, warning=FALSE}
+#gráficos
+funcion_descriptivos(data_modelos,variables,output_dir = "graficos_planetas")
+
+```
+
+```{r, message=FALSE}
+#tablas
+generar_tablas_gt(data_modelos, listconti3, carpeta = "graficos_planetas")
+```
+
+
+## Categórico
+
+Para las variables categóricas se ha diseñado una función que imprime y guarda gráficos de barras para cada variable
+
+::: {.callout-warning}
+Se ha decidido eliminar en este punto, disc_facility, porque no tiene valor.
+:::
+```{r}
+variables_categoricas <- c(
+  "discoverymethod", "disc_locale", "disc_facility",
+  "disc_telescope", "st_spectype", "st_metratio","ttv_flag", "dummy_disposition"
+)
+
+graficar_categoricas_horizontal_v2(
+  data = data_modelos,
+  variables = variables_categoricas,
+  output_dir = "graficos_categoricos"
+)
+
+```
+
+```{r}
+generar_tablas_frecuencia_gt(data_modelos, variables_categoricas, carpeta = "graficos_categoricos")
+```
+
+# Combinacion de variables
+
+## discovery_method x dummy_disposition
+
+```{r}
+g1 <- ggplot(data_modelos, aes(x = discoverymethod, fill = factor(dummy_disposition))) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta,colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Método de descubrimiento", y = "Proporción", 
+       title = "Distribución de confirmaciones por método") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(g1)
+
+```
+
+```{r}
+# Tabla de proporciones
+prop.table(table(data_modelos$discoverymethod, data_modelos$dummy_disposition), margin = 1)
+table(data_modelos$discoverymethod, data_modelos$dummy_disposition)
+```
+
+## dummy_disposition x disc_locale
+
+```{r}
+g2<- ggplot(data_modelos, aes(x = disc_locale, fill = factor(dummy_disposition))) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta,colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Localización", y = "Proporción", 
+       title = "Distribución de confirmaciones por localización") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(g2)
+```
+
+No es casualidad que sean iguales, el tránsito siempre es desde el espacio. 
+
+```{r}
+# Tabla de proporciones
+prop.table(table(data_modelos$disc_locale, data_modelos$dummy_disposition), margin = 1)
+table(data_modelos$disc_locale, data_modelos$dummy_disposition)
+```
+
+## disc_facility x disc_locale
+
+::: callout-note
+1.  Que colores usar
+2.  Esto puede ser interesante para explicar lo de arriba
+:::
+
+```{r}
+g3 <- ggplot(data_modelos, aes(x = disc_locale, fill = factor(disc_facility))) +
+  geom_bar(position = "fill") +
+  labs(x = "Localización", y = "Proporción", 
+       title = "Distribución de confirmaciones por localización") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(g3)
+```
+
+
+## sy_dist x dummy_disposition
+
+```{r}
+g4 <-ggplot(data_modelos, aes(x = dummy_disposition, y = sy_dist, fill = dummy_disposition))+
+  geom_boxplot(outlier.color = brewer.pal(9,"Set1")[6])+
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta,colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Localización", y = "Proporción", 
+       title = "Distribución de confirmaciones por localización") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(g4)
+  
+```
+
+```{r}
+ggplot(data_modelos, aes(x = factor(dummy_disposition), y = sy_dist)) +
+  geom_violin(aes(fill = factor(dummy_disposition)), trim = FALSE) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  stat_summary(fun = "median", geom = "point", size = 3, color = colores_paleta_spectral$puntos) +
+  scale_x_discrete(labels = c("No exoplaneta", "Exoplaneta")) +
+  labs(x = "Estado de confirmación", y = "Distancia al sistema planetario (Parsécs)") +
+  theme_minimal()
+```
+
+## st_metratio x st_mass
+
+```{r}
+g5 <- ggplot(data_modelos, aes(x = st_metratio, y =st_mass, fill = dummy_disposition))+
+  geom_boxplot(outlier.color = colores_paleta_spectral$puntos)+
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta,colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Localización", y = "Masa estelar", 
+       title = "Distribución de confirmaciones por localización") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+print(g5)
+```
+
+```{r}
+ggplot(data_modelos, aes(x = st_metratio, y = st_mass)) +
+  geom_violin(aes(fill = factor(dummy_disposition)), trim = FALSE) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  scale_x_discrete(labels = c("No exoplaneta", "Exoplaneta")) +
+  labs(x = "Estado de confirmación", y = "Masa estelar") +
+  theme_minimal()
+```
+
+## st_mass x dummy_disposition
+
+```{r}
+g6 <- ggplot(data_modelos, aes(x = st_mass, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("Candidato", "Exoplaneta")) +
+  labs(x = "Masa estelar (M☉)", y = "Densidad",
+       title = "Distribución de masa estelar por estado de confirmación") +
+  theme_minimal()
+print(g6)
+```
+
+```{r, eval=FALSE}
+ks.test(data_modelos$st_mass[data_modelos$dummy_disposition == 0], 
+        data_modelos$st_mass[data_modelos$dummy_disposition == 1])
+
+```
+
+## st_metratio x dummy_disposition
+
+```{r}
+g7 <- ggplot(data_modelos, aes(x = factor(dummy_disposition), y = st_metratio)) +
+  geom_violin(aes(fill = factor(dummy_disposition)), trim = FALSE) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  stat_summary(fun = "median", geom = "point", size = 3, color = colores_paleta_spectral$puntos) +
+  scale_x_discrete(labels = c("No exoplaneta", "Exoplaneta")) +
+  labs(x = "Estado de confirmación", y = "Ratio Metálico") +
+  theme_minimal()
+print(g7)
+```
+
+```{r, eval=FALSE}
+library(mclust)
+densityMclust(data_modelos$st_metratio) %>% plot()
+```
+
+## st_met x st_mass
+
+```{r}
+g8 <- ggplot(data_modelos, aes(x = st_mass, y = st_met)) +
+  geom_hex(bins = 40) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "tp")) +
+  scale_fill_viridis_c(option = "plasma") +
+  labs(x = "Masa estelar (log M☉)", y = "Metalicidad [Fe/H]",
+       title = "Relación masa-metalicidad estelar") +
+  theme_minimal() +
+  scale_x_log10()
+
+print(g8)
+```
+
+```{r}
+cor.test(data_modelos$st_mass, data_modelos$st_met, method = "spearman")
+```
+
+Con el test de Spearman confirmamos una relación positiva significativa entre las variables.
+
+Este es un mapa de calor hexagonal, se agrupan los puntos en hexágonos (a más amarillo mas puntos). se le añade una modelos GAM, parecido a un ajuset lineal, pero curvo. Es mejor para un analisis exploratorio ya que no es tan estricto como un modelo lineal.
+
+Las fórmula se presentan a continuación.
+
+La variable st_met representa la metalicidad estelar, definida como la proporción logarítmica de hierro respecto al hidrógeno comparada con la del Sol (\[Fe/H\]). En nuestra muestra, la media de la metalicidad es de -0.0558, lo que indica que la mayoría de las estrellas tienen una proporción de metales ligeramente inferior a la solar. Esto sugiere que las estrellas del conjunto de datos, en promedio, son menos ricas en elementos pesados, lo cual puede tener implicaciones relevantes en la formación planetaria, ya que se ha observado que una mayor metalicidad favorece la presencia de planetas gigantes.
+
+::: callout-note
+Se ha optado por un modelo aditivo generalizado (GAM) para representar la relación entre masa estelar y metalicidad debido a la aparente no linealidad observada. A nivel exploratorio, el GAM proporciona un mejor ajuste visual. Sin embargo, se ha comparado con un modelo lineal simple y se observa que el $R^2_{gam} = 0.042$ y $R^2_{lm} = 0.005$, aunque el AIC del modelo lineal es levemente inferior al del modelo gam, por observación y $R^2$ escogemos GAM.
+:::
+
+$gam \equiv y = \beta\_0 + f_1(x_1)+f_2(x_2)+...+\varepsilon $
+
+Un modelo aditivo generalizado permite modelar relaciones no lineales entre las variables sin especificar una forma funcional concreta. En lugar de ajustar rectas, ajusta funciones suaves (splines) penalizadas, aprendidas a partir de los datos. Esto ofrece mayor flexibilidad en la representación de relaciones complejas, como la que observamos entre masa estelar y metalicidad.
+
+## pl_trandep x dummy_dispositon
+
+```{r}
+g9 <- ggplot(data_modelos, aes(x = pl_trandep, fill = dummy_disposition)) +
+  geom_density(alpha = 0.6) +
+  scale_x_continuous(trans = "log1p") + #log(1+x)
+    annotation_logticks(sides = "b") +
+    scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  labs(x = "Profundidad de tránsito (log-scale)", y = "Densidad",
+       title = "Distribución de profundidad de tránsito por estado") +
+  theme_minimal()
+print(g9)
+```
+
+## pl_tranmid x dummy_disposition
+
+```{r}
+ggplot(data_modelos, aes(x = pl_tranmid_std, fill = dummy_disposition)) +
+  geom_density(alpha = 0.6) +
+  scale_x_continuous(trans = "log1p") +
+  annotation_logticks(sides = "b") +
+    scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  labs(x = "Profundidad de tránsito (log-scale)", y = "Densidad",
+       title = "Distribución de profundidad de tránsito por estado") +
+  theme_minimal()
+
+```
+
+Podemos ver tambien la variable *pl_tranmid* en vez de como días julianos como una fecha en el calendario
+
+```{r}
+data_modelos$fecha_transito <- as.Date(data_modelos$pl_tranmid_std - 2440587.5, origin = "1970-01-01")
+```
+
+```{r}
+g10 <- ggplot(data_modelos, aes(x = fecha_transito, fill = dummy_disposition)) +
+  geom_density(alpha = 0.6) +
+  annotation_logticks(sides = "b") +
+    scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  labs(x = "fecha", y = "Densidad",
+       title = "Distribución de profundidad de tránsito por estado") +
+  theme_minimal()
+print(g10)
+```
+
+Como vemos, los años coinciden (obviamente) con el tiempo en el que el telescopio K2 estuvo activo (2014-2018)
+
+## discovery_method x pl_orbper
+
+```{r}
+g11 <- ggplot(data_modelos, aes(x = discoverymethod, y = pl_orbper)) +
+  geom_violin(aes(fill = discoverymethod), scale = "width") +
+  geom_boxplot(width = 0.2, fill = "white") +
+  scale_y_log10(breaks = c(1, 10, 100, 1000)) +
+  scale_fill_manual(
+    values = c(
+      "Radial Velocity" = brewer.pal(7,"BuGn")[3],
+      "Transit" = brewer.pal(7,"BuGn")[4],        
+      "Microlensing" = brewer.pal(7,"BuGn")[5],     
+      "NA" = brewer.pal(7,"BuGn")[6]                
+    ))+
+  annotation_logticks(sides = "l") +
+  labs(x = "Método de descubrimiento", y = "Período orbital (días, log-scale)") +
+  theme_minimal()
+print(g11)
+```
+
+## st_mass x pl_mass
+
+```{r}
+g12 <- ggplot(data_modelos, aes(x = st_mass, y = pl_rade)) +
+  geom_point(alpha = 0.4, shape = 16) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2)) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Masa estelar (log M☉)", y = "Radio del planeta",
+       title = "Relación masa estelar-masa planetaria") +
+  theme_minimal()
+print(g12)
+```
+
+```{r}
+cor.test(data_modelos$st_mass, data_modelos$pl_rade, method = "spearman")
+```
+
+Con un p-valor ínfimo y un coeficiente $\rho = 0.3912$ podemos concluir que hay una asociacion positiva entre *pl_rade* y *st_mass*
+
+Vamos añadir la división por confirmación
+
+```{r}
+g13<-ggplot(data_modelos, aes(x = st_mass, y = pl_rade, color = dummy_disposition)) +
+  geom_point(alpha = 0.4, shape = 16) +
+ #geom_smooth(method = "lm", formula = y ~ poly(x, 2), se = F) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "tp"), se = F) +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Masa estelar (log M☉)", y = "Radio del planeta",
+       title = "Relación masa estelar-masa planetaria") +
+  theme_minimal()
+print(g13)
+```
+
+## pl_rade x dummy_disposition
+
+```{r}
+g14 <- ggplot(data_modelos, aes(x = pl_rade, fill = factor(dummy_disposition))) +
+  geom_density(position = "identity", alpha = 0.6) +
+  scale_x_log10() +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+
+  labs(x = "Radio planetario (log R)", y = "Densidad",
+       title = "Distribución de radios planetarios") +
+  theme_minimal()
+print(g14)
+```
+
+## st_teff vs pl_rade
+
+```{r}
+g15 <- ggplot(data_modelos, aes(x = st_teff, y = pl_rade)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "gam", formula = y ~ s(x, bs = "tp"), se = F) +
+  labs(x = "Log de Temperatura estelar (K)", y = "Log de Radio planetario (R⊕)", color = "Estado") +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_minimal()
+print(g15)
+```
+
+Vamos a añadir la división por confirmación
+
+```{r}
+g16 <- ggplot(data_modelos, aes(x = st_teff, y = pl_rade, color = factor(dummy_disposition))) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = F) +
+  scale_color_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Log de Temperatura estelar (K)", y = "Log de Radio planetario (R⊕)", color = "Estado") +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme_minimal()
+print(g16)
+```
+
+## sy_dist vs pl_orbper segun discovery_method
+
+```{r}
+g17 <- ggplot(data_modelos, aes(x = sy_dist, y = pl_orbper, color = discoverymethod)) +
+  geom_point(alpha = 0.5) +
+  scale_x_log10() + scale_y_log10() +
+  labs(x = "Distancia al sistema (pc, log)", y = "Período orbital (días, log)", color = "Método") +
+  theme_minimal()
+print(g17)
+```
+
+## st_logg vs pl_trandep según dummy_disposition
+
+```{r}
+g18 <- ggplot(data_modelos, aes(x = st_logg, y = pl_trandep, color = factor(dummy_disposition))) +
+  geom_point(alpha = 0.8) +
+  scale_color_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), labels = c("No exoplaneta", "Exoplaneta")) +
+  labs(x = "Log(g) estelar", y = "Profundidad de tránsito", color = "Estado") +
+  theme_minimal()
+print(g18)
+```
+
+Mejoramos la visisibilidad
+
+```{r}
+g19 <- ggplot(data_modelos, aes(x = st_logg, y = pl_trandep, color = factor(dummy_disposition))) +
+  geom_point(alpha = 0.8) +
+  scale_y_continuous(limits = c(0, 30))+
+  scale_color_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), labels = c("No exoplaneta", "Exoplaneta")) +
+  labs(x = "Log(g) estelar", y = "Profundidad de tránsito", color = "Estado") +
+  theme_minimal()
+print(g19)
+```
+
+**observamos todas las combinaciones a la vez**
+
+```{r}
+library(ggpubr)
+graficos <- list(g1, g2, g3, g4, g5, g6, g7, g8, g9, g10,
+                 g11, g12, g13, g14, g15, g16, g17, g18, g19)
+
+# Combinar los gráficos en una cuadrícula
+figura_completa <- ggarrange(plotlist = graficos, 
+                             ncol = 5, nrow = 4) 
+
+# Guardar la imagen
+ggsave("C:/Users/rodri/Desktop/Estadística_Leo/tfg/exoplanetas/BBDD_explicando/graficos_planetas/graficos_combined.png", figura_completa, width=15, height=12)
+
+print(figura_completa)
+
+```
+
+# Tres variables...
+
+```{r}
+ggplot(data_modelos, aes(x = st_mass, y = pl_rade)) +
+  geom_point(aes(color = factor(dummy_disposition)), alpha = 0.6) +
+  facet_wrap(~ disc_locale, scales = "free") +
+  scale_x_log10() +
+  scale_y_log10() +
+  labs(x = "Masa estelar (log M☉)", y = "Radio planetario (log R⊕)") +
+  theme_minimal()
+
+```
+
+```{r}
+library(plotly)
+plot_ly(data_modelos, x = ~st_mass, y = ~pl_rade, z = ~pl_orbper,
+        color = ~factor(dummy_disposition), colors = c("#FF0000", "#0000FF")) %>%
+  add_markers() %>%
+  layout(scene = list(xaxis = list(type = "log", title = "Masa estelar"),
+                      yaxis = list(type = "log", title = "Radio planetario"),
+                      zaxis = list(type = "log", title = "Período orbital")))
+
+```
+
+# Correlaciones
+
+::: callout-note
+Como dummy_disposition es binaria, puedes calcular la correlación punto-biserial (que es equivalente a la correlación de Pearson entre una variable continua y una binaria codificada como 0/1).
+:::
+
+$$r_{pb} = \frac{M_1-M_0}s·\sqrt{\frac{n_1n_0}{n(n-1}}$$ $M_1, M_0\;\text{son las medias de los grupos}$ $s \;\text{es la desviación estandar}$ $n\;\text{es el tamaño muestral}$
+
+```{r}
+# Función para calcular correlación punto-biserial y p-valor
+calc_pb <- function(x){
+  test <- cor.test(x, as.numeric(data_modelos$dummy_disposition), method = "pearson")
+  return(c(r = test$estimate, p = test$p.value))
+}
+
+cor_results <- t(sapply(data_modelos[listconti3], calc_pb))
+cor_results <- cor_results[order(-cor_results[, "r.cor"]), ]
+
+print(cor_results)
+```
+
+Vamos a representar graficamente los resultados de la correlación:
+
+```{r}
+# Convertimos los resultados a dataframe
+cor_df <- as.data.frame(cor_results)
+cor_df$variable <- rownames(cor_df)
+cor_df <- cor_df %>%
+  mutate(significativo = ifelse(p < 0.05, "Significativo", "No significativo"),
+         variable = fct_reorder(variable, r.cor))
+
+# Gráfico
+ggplot(cor_df, aes(x = variable, y = r.cor, fill = significativo)) +
+  geom_col() +
+  coord_flip() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Variable continua", y = "Correlación punto-biserial con disposición",
+       title = "Relación entre variables continuas y la disposición del planeta",
+       fill = "p < 0.05") +
+  scale_fill_manual(values = c("Significativo" = colores_paleta$histograma, "No significativo" = "gray")) +
+  theme_minimal()
+
+```
+
+::: callout-note
+Correlaciones positivas destacadas: st_logg (log g, gravedad superficial): $ \rho \approx 0.33$
+
+st_met (metallicidad): $ \rho \approx 0.29$
+
+sy_pm (movimiento propio total): $ \rho \approx 0.20$
+
+Esto sugiere que los planetas confirmados tienden a encontrarse alrededor de estrellas con mayor gravedad, mayor metalicidad y mayor movimiento propio.
+
+Correlaciones negativas fuertes: pl_rade (radio del planeta): $ \rho \approx - 0.54$
+
+sy_dist (distancia): $ \rho \approx -0.47$
+
+pl_trandep (profundidad del tránsito): $ \rho \approx -0.42$
+
+st_rad (radio estelar): $ \rho \approx -0.36$
+
+Estas variables sugieren que los planetas confirmados tienden a estar más cerca, tener tránsitos más profundos, y orbitar estrellas más pequeñas.
+
+Esto tiene sentido físico y observacional, ya que:
+
+Tránsitos más profundos y estrellas más pequeñas facilitan la detección y confirmación.
+
+Estrellas más cercanas proporcionan mejor resolución y seguimiento.
+:::
+
+::: callout-note
+No se puede calcular una correlación tradicional entre dos factores, pero sí puedes medir asociación usando el coeficiente V de Cramer o el test de chi-cuadrado.
+:::
+
+```{r}
+# Función para calcular V de Cramér
+calc_cramersV <- function(var) {
+  tbl <- table(data_modelos[[var]], data_modelos$dummy_disposition)
+  v <- cramersV(tbl)
+  return(v)
+}
+
+# Aplica la función a todas las variables categóricas
+cramersV_results <- sapply(listdiscr3, calc_cramersV)
+
+cramersV_results <- sort(cramersV_results, decreasing = TRUE)
+print(cramersV_results)
+
+df_cramer <- data.frame(variable = names(cramersV_results), value = cramersV_results)
+ggplot(df_cramer, aes(x = reorder(variable, value), y = value)) +
+  geom_col(fill = "#4ECDC4") +
+  coord_flip() +
+  labs(x = "Variable categórica", y = "V de Cramér",
+       title = "Asociación con dummy_disposition") +
+  theme_minimal()
+```
+
+Como podemos ver, la única variable que tiene una relación fuerte con la variable dependiente es st_metratio.
+
+Hemos de calcular aún asi el coeficiente de chi-cuadrado para ver si estas relaciones son significativas.
+
+$H_0: \text{no existe asociacion entre las variables}$ $H_1: \text{sí existe asociación entre las variables}$
+
+```{r}
+resultados <- data.frame(
+  variable = character(),
+  test = character(),
+  p_value = numeric(),
+  min_esperado = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (var in listdiscr3) {
+  idx <- complete.cases(data_modelos[[var]], data_modelos$dummy_disposition)
+  x <- data_modelos[[var]][idx]
+  y <- data_modelos$dummy_disposition[idx]
+  
+  tbl <- table(x, y)
+  
+  chi <- suppressWarnings(chisq.test(tbl, correct = FALSE))
+  min_esperado <- min(chi$expected)
+  
+  if (all(chi$expected >= 5)) {
+    # Chi-cuadrado válido
+    test <- "Chi-cuadrado"
+    p_value <- chi$p.value
+  } else {
+    # Usar Fisher si hay celdas con esperados < 5
+    test <- "Fisher"
+    fisher <- fisher.test(tbl)
+    p_value <- fisher$p.value
+  }
+  
+  resultados <- rbind(resultados, data.frame(
+    variable = var,
+    test = test,
+    p_value = p_value,
+    min_esperado = min_esperado,
+    stringsAsFactors = FALSE
+  ))
+}
+
+resultados <- resultados %>% arrange(p_value)
+print(resultados)
+
+```
+
+::: callout-note
+El análisis de asociación entre las variables categóricas y la variable dependiente mostró que la mayoría de las variables presentan frecuencias esperadas bajas, por lo que se aplicó el test exacto de Fisher en lugar del chi-cuadrado. Las variables st_metratio, disc_locale y ttv_flag presentan asociaciones estadísticamente significativas con la confirmación de exoplanetas (p \< 0.05), mientras que otras variables como discoverymethod, disc_facility y st_spectype no muestran evidencia suficiente de asociación. El cumplimiento del requisito de valores esperados se verificó en cada caso para garantizar la validez de las pruebas aplicadas.
+:::
+
+```{r, fig.width=8, fig.height=8}
+bandas_ordenadas <- data_modelos[,c("sy_umag", "sy_bmag", "sy_gmag", "sy_vmag", "sy_rmag", "sy_imag",
+"sy_zmag", "sy_jmag", "sy_hmag", 
+"sy_kmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", 
+"sy_tmag", "sy_kepmag")]
+# Seleccionar las columnas de interés
+bandas <- data_modelos[, c("sy_bmag", "sy_vmag", "sy_jmag", 
+"sy_hmag", "sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", "sy_imag", 
+"sy_zmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", 
+"sy_tmag", "sy_kepmag")]
+
+par(mar = c(2, 2, 2, 2)) # Reduce los márgenes
+# Crear la matriz de dispersión
+pairs(bandas_ordenadas,
+      main = "Matriz de gráficos de dispersión",
+      col = "purple")
+```
+
+
+```{r}
+# Seleccionar solo las variables de bandas fotométricas
+bandas<- data_modelos[,c("sy_umag", "sy_bmag", "sy_gmag", "sy_vmag", "sy_rmag", "sy_imag",
+"sy_zmag", "sy_jmag", "sy_hmag", 
+"sy_kmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", 
+"sy_tmag", "sy_kepmag")]
+
+# Eliminar filas con NA para evitar problemas en el cálculo
+bandas <- na.omit(bandas)
+
+# Calcular la matriz de correlación
+cor_matrix <- cor(bandas, use = "pairwise.complete.obs")
+
+# Reordenar las variables según los grupos espectrales
+variables_ordenadas <- c(
+  # UV/Visible
+  "sy_umag", "sy_bmag", "sy_gmag", "sy_vmag", "sy_rmag", "sy_imag",
+  # Infrarrojo cercano
+  "sy_zmag", "sy_jmag", "sy_hmag", "sy_kmag",
+  # Infrarrojo lejano
+  "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag",
+  # Bandas específicas de misiones
+  "sy_gaiamag", "sy_tmag", "sy_kepmag"
+)
+
+# Reorganizar la matriz de correlación para que coincida con el orden deseado
+cor_matrix_ordenada <- cor_matrix[variables_ordenadas, variables_ordenadas]
+
+# Definir una paleta de colores
+#col <- colorRampPalette(c("midnightblue", "royalblue", "white", "salmon", "darkred"))(100)
+col <- rev(brewer.pal(n = 11, name = "RdYlBu"))
+# Crear el gráfico de la matriz de correlación
+corrplot(cor_matrix_ordenada, 
+         method = "color",      # Mostrar valores como colores
+         type = "full",         # Matriz completa, no solo la mitad
+         tl.col = "black",      # Color del texto de las etiquetas
+         tl.srt = 90,           # Rotación del texto de las etiquetas
+         tl.cex = 0.7,          # Tamaño del texto de las etiquetas
+         cl.cex = 0.7,          # Tamaño del texto de la leyenda
+         col = col,             # Paleta de colores
+         diag = TRUE)           # Mostrar la diagonal
+
+```
+
+```{r}
+# Calcular la matriz de correlación
+correlacion <- cor(bandas_ordenadas, use = "complete.obs")
+
+# Mostrar la matriz de correlación
+print(correlacion)
+
+# Graficar un mapa de calor para visualizar las correlaciones
+library(corrplot)
+corrplot(correlacion, method = "color", type = "lower", tl.col = "black")
+```
+```{r}
+# Comparar bandas visibles (B y V) con infrarrojas (J, H, Ks)
+par(mfrow = c(2, 3)) # Crear una cuadrícula de gráficos (2x2)
+
+# Banda B vs Banda J
+plot(data_modelos$sy_bmag, data_modelos$sy_jmag,
+     xlab = "Brillo en banda B (sy_bmag)",
+     ylab = "Brillo en banda J (sy_jmag)",
+     main = "Banda B vs Banda J",
+     col = "blue", pch = 19)
+abline(lm(sy_jmag ~ sy_bmag, data = data_modelos), col = "red", lwd = 2)
+
+plot(data_modelos$sy_vmag, data_modelos$sy_jmag,
+     xlab = "Brillo en banda V (sy_vmag)",
+     ylab = "Brillo en banda J (sy_jmag)",
+     main = "Banda  V vs Banda J",
+     col = "blue", pch = 19)
+abline(lm(sy_jmag ~ sy_vmag, data = data_modelos), col = "red", lwd = 2)
+
+plot(data_modelos$sy_gmag, data_modelos$sy_jmag,
+     xlab = "Brillo en banda G (sy_gmag)",
+     ylab = "Brillo en banda J (sy_jmag)",
+     main = "Banda  G vs Banda J",
+     col = "blue", pch = 19)
+abline(lm(sy_jmag ~ sy_gmag, data = data_modelos), col = "red", lwd = 2)
+
+plot(data_modelos$sy_rmag, data_modelos$sy_jmag,
+     xlab = "Brillo en banda R (sy_rmag)",
+     ylab = "Brillo en banda J (sy_jmag)",
+     main = "Banda  R vs Banda J",
+     col = "blue", pch = 19)
+abline(lm(sy_jmag ~ sy_rmag, data = data_modelos), col = "red", lwd = 2)
+
+plot(data_modelos$sy_imag, data_modelos$sy_jmag,
+     xlab = "Brillo en banda I (sy_imag)",
+     ylab = "Brillo en banda J (sy_jmag)",
+     main = "Banda  I vs Banda J",
+     col = "blue", pch = 19)
+abline(lm(sy_jmag ~ sy_imag, data = data_modelos), col = "red", lwd = 2)
+```
+
+
+```{r}
+#guardo la base de datos que en este archivo ha sido modificada.
+
+setwd("C:/Users/rodri/Desktop/Estadística_Leo/tfg/exoplanetas/BBDD_explicando")
+save(data_modelos, file = "data_modelos_conMissings.RData")
+```

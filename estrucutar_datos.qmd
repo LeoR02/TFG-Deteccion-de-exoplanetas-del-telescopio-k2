@@ -1,0 +1,24 @@
+---
+title: "Estructurando los datos NO SE USA"
+author: "Leo Rodríguez"
+toc: true
+toc-depth: 4
+toc-location: left
+format: html
+editor: visual
+self-contained: true
+---
+
+```{r}
+library(dplyr)
+library(naniar) # análisis de valores perdidos
+library(readxl) #para ver si el archivo excel me lee mejor los datos
+```
+
+En este documento se usan los datos **datos_k2** que contienen 1803 observaciones de 69 variables
+
+# Carga de datos
+
+```{r}
+load("datosk2.Rdata")
+```

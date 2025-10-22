@@ -1,0 +1,506 @@
+---
+title: "Análisis y Depuración de datos"
+author: "Leo Rodríguez"
+toc: true
+toc-depth: 4
+toc-location: left
+format: html
+editor: visual
+self-contained: true
+---
+
+# Librerias
+
+```{r, warning=FALSE, message=FALSE,collapse=TRUE}
+library(mice) #imputacion
+library(CALIBERrfimpute)
+library(dplyr) #trat. datos
+library(missForest) #imputacion
+library(ggplot2)
+library(RColorBrewer) #colores en visualizaciones
+library(naniar) #valores miss
+library(caret)  #CV
+library(randomForest)
+library(gridExtra)
+
+library(VIM) #valores missing
+library(patchwork) #gráficos
+
+library(doParallel)
+cluster <- makeCluster(detectCores()- 1)
+registerDoParallel(cluster)
+```
+
+
+# Carga de datos
+
+```{r}
+load("data_modelos_conMissings.RData")
+```
+
+```{r}
+data_modelos$dummy_disposition <- recode(data_modelos$dummy_disposition, 
+                                         "No Exoplaneta" = "No_Exoplaneta", 
+                                         "Exoplaneta" = "Exoplaneta")
+```
+
+del archivo **imputación basada en árboles EUSTAT**
+
+La imputación múltiple (Little y Rubin 1986-87) consiste en imputar los valores perdidos por m\>1 valores simulados. A traves de modelos de predicción, tras esto se realiza un análisis de las m matrices completas.
+
+1.  Seleccionar las variables que se emplearán en el modelol de imputación. Es imprescindible que todas las variables que se van a usar conjuntamente en posteriores análisis se incluyan en dicho modelo, asi como, todas las variabelq ue ayuden a estimar el valor missing
+2.  Decidir el número de imputaciones que se desean realizar, según Rubin entre 3 y 5 son suficientes.
+3.  Decudir el método de imputacion a aplicar
+
+# 1. Valores imposibles fisicamente
+
+Como hemos visto en el archivo de ánalisis exploratorio, existen algunos valores que son fisicamente imposibles, vamos a transformarlos en perdidos
+
+## pl_trandep
+
+pl_trandep = 135. Este valor implica que el tránsito del planeta sobre la estrella opaca el 135% de la luz emitida de la estrella. Claramente esto es imposible.
+
+```{r}
+data_modelos <- data_modelos |> 
+  mutate(pl_trandep = ifelse(pl_trandep > 100, NA, pl_trandep))
+```
+
+## pl_rade
+
+pl_rade = 105. Este valor es más típico de una estrella que de un planeta, el Sol tiene en torno a 109 radios terrestres. En la práctica se han observado planetas de hasta 25 radios terrestres.
+
+```{r}
+data_modelos <- data_modelos |> 
+  mutate(pl_rade = ifelse(pl_rade > 25, NA, pl_rade))
+```
+
+## fotometria
+
+Las bandas fotométricas estan medidas en maginutdes, una escala logarítmica inversa, es decir, que a menor valor mayor brillo, se basa en la ecuación de Pogson
+
+$m_1-m_2 = -2.5·log_{10}(\frac{F1}{F2})$ donde m es la magnitud y F el flujo recibido de la banda correspondiente.
+
+Los valores se obtienen mediante filtros que dejan pasar longitudes de onda específicas.
+
+Los valores esperandos van de 0 a 20, por tanto, los valores encontrados superiores a 20 (p.ej 25, 30) indican no detectado o fuera de rango.
+
+Encontramos tras el estudio descriptivo que las variables problemáticas son: **sy_umag**,**sy_gmag**,**sy_rmag**
+
+```{r}
+#banda U
+
+data_modelos <- data_modelos |> 
+  mutate(sy_umag = ifelse(sy_umag > 25, NA, sy_umag))
+
+#banda G
+data_modelos <- data_modelos |> 
+  mutate(sy_gmag = ifelse(sy_gmag > 25, NA, sy_gmag))
+
+#banda R
+data_modelos <- data_modelos |> 
+  mutate(sy_rmag = ifelse(sy_rmag > 25, NA, sy_rmag))
+
+```
+
+# 2. Variables inútiles
+
+Tras el análisis exploratorio encontramos variables que son inútiles tanto de manera exploratoria como de manera predictiva, por eso en este archivo (previo al modelado) se eliminarán
+
+## discovery_method
+
+Es una variable inútil, porque estamos estudiando los datos de K2, por tanto, el 100% de los planetas o candidatos deberian de haber sido descubiertos mediante el método de tránsito
+
+```{r}
+data_modelos$discoverymethod <- NULL
+```
+
+## disc_locale
+
+Por lo mismo que anteriormente, el telescopio K2 trabjaba en el espacio
+
+```{r}
+data_modelos$disc_locale <- NULL
+```
+
+## disc_facility
+
+Otras dependencias son inútiles en el estudio, ademas de que no hay variabilidad en las mismas, tan solo se presentan un par de valores para otros telescopios
+
+```{r}
+data_modelos$disc_facility <- NULL
+```
+
+## disc_telescope
+
+Es una variable que carece de variabilidad
+
+```{r}
+data_modelos$disc_telescope <- NULL
+```
+
+## st_spectype
+
+Carece de variabilidad también.
+
+```{r}
+data_modelos$st_spectype <- NULL
+```
+
+## ttv_flag
+
+Variable altamente desbalanceada, carece de variabilidad.
+
+```{r}
+data_modelos$ttv_flag <- NULL
+```
+
+## pl_tranmid_std y fecha_transito
+
+Estas variables carecen de útilidad predictiva
+
+```{r}
+data_modelos$pl_tranmid_std <- NULL
+data_modelos$fecha_transito <- NULL
+```
+
+Antes de proceder con el estudio, vamos a definir las listas de variables separando por continuas y discretas.
+
+```{r}
+#lista de vbles continuas:
+listconti3 <- c("pl_orbper", "pl_rade", "pl_trandep", "pl_trandur", 
+ "st_teff", "st_rad", "st_mass", "st_met","st_logg", "sy_pm", "sy_pmra", "sy_pmdec", "sy_dist","sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", 
+"sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", 
+"sy_w3mag", "sy_w4mag", "sy_gaiamag", "sy_tmag", "sy_kepmag")
+
+#lista de vbles discretas;
+listdiscr3 <- setdiff(colnames(data_modelos), listconti3)
+
+#quitamos el nombre, lo consideramos una "key"
+listdiscr3 <- listdiscr3[listdiscr3 != "pl_name"]
+
+#quitamos la vble dependiente
+listdiscr3 <- listdiscr3[listdiscr3 != "dummy_disposition"]
+vble_dependiente <- "dummy_disposition"
+```
+
+::: callout-note
+En este punto, el dataset **data_modelos** contiene 827 observaciones y 33 variables
+:::
+
+Antes de proceder con el estudio, se eliminarán todas las filas que no contengan ningun valor válido, no aportan información y pueden traer errores en la imputación.
+
+```{r}
+#sin contar pl_name ni dummy_disposition
+data_modelos <- data_modelos[!apply(is.na(data_modelos[c("pl_orbper", "pl_rade", "pl_trandep", "pl_trandur", "st_teff", "st_rad", "st_mass", "st_met", "st_metratio", "st_logg", 
+"sy_pm", "sy_pmra", "sy_pmdec", "sy_dist", "sy_bmag", "sy_vmag", 
+"sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", 
+"sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", 
+"sy_gaiamag", "sy_tmag", "sy_kepmag")]), 1, all), ]
+
+vis_miss(data_modelos)
+```
+
+```{r, eval=FALSE}
+#| echo: false
+save(data_modelos, file = "data_modelos_clean.RData")
+```
+
+::: callout-note
+En este punto el datset **data_modelos** contiene 773 observaciones y 33 variables
+:::
+
+# 4. Outliers extremos
+
+La detección de valores atípicos (outliers) es un paso fundamental previo a la modelización. En la litereatura se han usado varias formas para su detección, en este caso usaremos la medida **MAD**, mediana de desviaciones absolutas.
+
+Vamos a darle dos enfoques al trabajo, obteniendo dos bases de datos. Por un lado usaremos MAD para detectar y eliminar los outliers extremos (similar a 6 sigma) y por otro lado winsorizamos con los percentiles 1 y 99.
+
+**¿por qué el uso de MAD?**: MAD, a diferencia del método común, la desviación típica, usa la mediana como medida de centralidad, lo que lo hace más robusto frente a valores muy extremos,ofrece mejoras en la simplicidad de calculo y es idoneo para datos con distribuciones no normales, ya que a diferencia de la desviación típica, MAD no asume normalidad en los datos.
+
+$$MAD = mediana(|X_i - mediana(X)|)$$ donde:
+
+$X_i$ representa cada obsercación de la variable X
+
+$mediana(X)$ representa la mediana de la variable X
+
+Existe tambien la corrección por la constante 1.4826, estimación consistente de la desviación estandar de una distribución normal,
+
+El valor 1.4826 proviene del tercer cuartil de la normal ($3\sigma$)
+
+$$\frac{1}{\phi^{-1}(0.75)}\simeq\frac{1}{0.6745}\simeq1.4826$$
+
+donde: $\phi^{-1}(0.75)$ es el tercer cuartil de una normal(0,1)
+
+Por tanto, $MAD_{corregido} = 1.4826·mediana(|X_i - mediana(X)|)$
+
+Consideramos valores atípicos o outliers aquellos que cumplan la siguiente condición
+
+$$\frac{|X_i - mediana(X)|}{MAD_{corregido}}>k\;\text{con}\;k=3,3.5$$
+
+Los valores seleccionados para $k$, son valores que dan buenos resultados en la literatura, similares al $3\sigma$
+
+## 4.1 Implementación MAD
+
+```{r}
+is_not_outlier <- rep(TRUE, nrow(data_modelos))
+
+for (var in listconti3) {
+  x <- data_modelos[[var]]
+  med <- median(x, na.rm = TRUE)
+  mad_val <- 1.4826 * median(abs(x - med), na.rm = TRUE)
+  lower <- med - 6 * mad_val
+  upper <- med + 6 * mad_val
+  
+  # Evaluamos la condición para detectar outliers
+  cond <- (x >= lower & x <= upper)
+  # Si el valor es NA, lo consideramos como "no outlier" para conservarlo
+  cond[is.na(cond)] <- TRUE
+  
+  # Acumulamos la condición para todas las variables
+  is_not_outlier <- is_not_outlier & cond
+}
+
+data_modelos_mad <- data_modelos[is_not_outlier, ]
+```
+
+```{r, eval=FALSE}
+save(data_modelos_mad,file ="data_modelos_mad.RData")
+```
+
+## 4.2 Winsorización 
+
+**finalmente no se utilizó**
+
+La Winsorización es un método conservador para el tratamiento de outliers. Al contrario de métodos que "truncan" el dataset, este reemplaza los valores extremos por el propio percentil elegido (en este caso inferiores al percentil 1 o superiores al 99).
+
+De esta forma no se pierde información y no se sesgan los datos en caso en que los outliers no se distribuyan de manera aleatoria.
+
+Como he comentado, aquellos valores que se salgan de los límtes (percentiles 1-99), serán reemplazados por tal percentil.
+
+```{r, eval=FALSE}
+train_wins <- data_train %>%
+  mutate(across(all_of(listconti3),
+    ~ {
+        # Calcular límites
+        lim_inf <- quantile(.x, 0.01, na.rm = TRUE)
+        lim_sup <- quantile(.x, 0.99, na.rm = TRUE)
+        # Winsorizar: recortar valores fuera de [lim_inf, lim_sup]
+        pmin(pmax(.x, lim_inf), lim_sup)
+      }
+  ))
+```
+
+# 5. Análisis de patrones
+
+El problema de la no respuesta es algo cotidiano en el mundo de la estadística.
+
+Este problema puede deberse a la sensibilidad de las preguntas (en estudios sociales), a un problema en la codificación de los datos o simplemente a perdida de la información.
+
+Antiguamente se eliminaban todas las filas que tuviesen algun valor faltante, esto suponia sesgar la información ya que se suponia que los datos perdidos estaban distribuidos de manera aleatoria y una perdida de información ya recabda.
+
+En los últimos años se han estado estudiando e impementando numerosas técnicas de remuestreo, que permiten imputar los valores perdidos mediante modelos estadísticos, disminuyendo asi el sesgo y obteniendo conjuntos de datos completos.
+
+A la hora de la imputación es importante definir los distintos tipos de datos perdidos que podemos tener.
+
+-   MCAR (Missing completely at Random): Se da cuando el valor perdido de la variable $X_j$ para el indiviuo $i$ no depende ni de la propia variable ni de otra variable $X_k$ presente en la matriz de datos. $$P(X_j/X_j,X_k)=P(X_j)$$ Es el caso más favorable para la imputación de datos
+
+-   MAR (Missing at Random), se da cuando el valor perdido de una variable $X_j$ para un individuo $i$, no depende estrictamente de la propia variable $X_{ij}$, pero tal vez, si que este relacionada con otra variable presente en la base de datos $X_{ik}\;,k\neq j$
+
+-   NMAR (No missing at Random): Se da cuando el valor perdido de una variable $X_j$ para un individuo $i$, depende de la propia variable $X_{ij}$, además de poder depender de otros factores
+
+Para hacer la imputación mediante árboles, se necesita trabajar bajo el supuesto de MCAR o MAR.
+
+Como podemos observar en el siguiente gráfico, tenemos variables con gran cantidad de datos perdidos.
+
+```{r}
+load("data_modelos_mad.rdata")
+vbles_estudio <- c("pl_name","st_teff", "st_rad", "st_mass", "st_met", "st_logg", "sy_pm", "sy_pmra", "sy_pmdec", "sy_dist", "sy_bmag", "sy_vmag", 
+"sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", 
+"sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", 
+"sy_gaiamag", "sy_tmag", "sy_kepmag", "dummy_disposition")
+
+missings <- gg_miss_var(data_modelos_mad[vbles_estudio], show_pct = T) + theme_minimal()
+ggsave("missings_1.png",missings)
+plot(missings)
+```
+
+Cabe destacar, que tenemos variables que podrian ser eliminadas debido al exceso de valores perdidos que presentan, se decide no hacerlo ya que son variables con alta capacidad predictiva, estudiada en modelos exploratorios entrenados anteriormente.
+
+```{r}
+vis_miss(data_modelos_mad[vbles_estudio]) # Visualización general de datos perdidos.
+```
+
+```{r}
+aggr(data_modelos_mad[vbles_estudio], col=c('skyblue', 'red'), numbers=TRUE, sortVars=TRUE, 
+     labels=names(data_modelos_mad), cex.axis=0.7, gap=2, ylab=c("Datos Faltantes", "Patrón"))
+```
+
+```{r}
+par(mfrow = c(2, 2))
+a1 <- VIM::marginplot(data_modelos[ ,c("sy_umag","sy_gmag")], pch = 19)
+a2 <- VIM::marginplot(data_modelos[ ,c("sy_umag","sy_rmag")], pch = 19)
+a3 <- VIM::marginplot(data_modelos[ ,c("sy_umag","sy_imag")], pch = 19)
+a4 <- VIM::marginplot(data_modelos[ ,c("sy_umag","sy_zmag")], pch = 19)
+```
+
+
+```{r}
+VIM::marginplot(data_modelos_mad[ ,c("sy_umag","sy_dist")], pch = 19)
+```
+
+::: callout-warning
+Hay que tener en cuenta, que las variables sy_umag, sy_gmag, sy_rmag, sy_imag y sy_zmag tienen los mismos valores perdidos para las mismas observaciones, es decir, los datos perdidos no parecen distribuirse de manera aleatoria.
+:::
+
+
+```{r}
+VIM::marginplot(data_modelos_mad[, c("sy_umag","sy_dist")], pch = 19)
+VIM::marginplot(data_modelos_mad[, c("sy_umag","st_teff")], pch = 19)
+```
+
+```{r}
+umag_glm <- glm(is.na(sy_umag) ~ sy_gaiamag + sy_dist + st_teff, 
+         data = data_modelos_mad, family = binomial)
+resumen_umag <- summary(umag_glm)
+# Exportar a portapapeles 
+write.table(round(resumen_umag$coefficients, digits = 3), file = "clipboard", sep = "\t", row.names = T, quote = FALSE)
+
+gmag_glm <- glm(is.na(sy_gmag) ~ sy_gaiamag + sy_dist + st_teff, 
+         data = data_modelos_mad, family = binomial)
+summary(gmag_glm)
+
+rmag_glm <- glm(is.na(sy_rmag) ~ sy_gaiamag + sy_dist + st_teff, 
+         data = data_modelos_mad, family = binomial)
+summary(rmag_glm)
+
+imag_glm <- glm(is.na(sy_imag) ~ sy_gaiamag + sy_dist + st_teff, 
+         data = data_modelos_mad, family = binomial)
+summary(imag_glm)
+
+zmag_glm <- glm(is.na(sy_zmag) ~ sy_gaiamag + sy_dist + st_teff, 
+         data = data_modelos_mad, family = binomial)
+summary(zmag_glm)
+
+zmag_glm <- glm(is.na(st_met) ~ sy_gaiamag + sy_dist + st_teff, 
+         data = data_modelos_mad, family = binomial)
+summary(zmag_glm)
+
+```
+
+
+```{r, eval=FALSE}
+#| echo: false
+library(MissMech)
+df_testMCAR <- data_modelos_mad[vbles_estudio]
+df_testMCAR$pl_name <- NULL
+df_testMCAR$dummy_disposition<- NULL
+str(df_testMCAR)
+
+result <- TestMCARNormality(df_testMCAR)
+print(result)
+
+```
+
+```{r, eval=FALSE}
+library(misty)
+library(mvnmle)
+na.test(a[,aconti])
+```
+
+
+# 6 Data leakage?
+
+```{r}
+load("data_modelos_mad.rdata")
+
+# Selecciona solo las variables predictoras
+vars_predictoras <- setdiff(names(data_modelos_mad), "dummy_disposition")
+vars_predictoras <- setdiff(vars_predictoras,"pl_name")
+```
+
+A continuación creamos las variables que recogen la información de los datos perdidos.
+
+```{r}
+data_modelos_mad$na_sum <- apply(data_modelos_mad[vars_predictoras], 1, function(x) sum(is.na(x)))
+
+#data_modelos_mad$na_prod <- apply(data_modelos_mad[vars_predictoras], 1, function(x) prod(is.na(x)))
+# aplicar a las variables predictoras, 1 = por filas, el producto
+#EL PRODUCTO SE HA ELIMINADO POR FALTA DE VARIABILIDAD
+
+data_modelos_mad$na_prop <- data_modelos_mad$na_sum / length(vars_predictoras)
+#creamos la proporción de NA por filas
+
+#en las variables que se sospecha data leakage crearemos NA.
+
+data_modelos_mad$na_trandep <- is.na(data_modelos_mad$pl_trandep)
+data_modelos_mad$na_trandur <- is.na(data_modelos_mad$pl_trandur)
+data_modelos_mad$na_met <- is.na(data_modelos_mad$st_met)
+data_modelos_mad$na_metratio <- is.na(data_modelos_mad$st_metratio)
+data_modelos_mad$na_umag <- is.na(data_modelos_mad$sy_umag)
+data_modelos_mad$na_gmag <- is.na(data_modelos_mad$sy_gmag)
+data_modelos_mad$na_rmag <- is.na(data_modelos_mad$sy_rmag)
+data_modelos_mad$na_imag <- is.na(data_modelos_mad$sy_imag)
+data_modelos_mad$na_zmag <- is.na(data_modelos_mad$sy_zmag)
+```
+
+## Imputación Strawman
+
+```{r}
+vars_numericas <- vars_predictoras[sapply(data_modelos_mad[vars_predictoras], is.numeric)]
+
+for (v in vars_numericas) {
+  mediana <- median(data_modelos_mad[[v]], na.rm = TRUE)
+  data_modelos_mad[[v]][is.na(data_modelos_mad[[v]])] <- mediana
+}
+
+```
+
+```{r}
+modelo_logit <- glm(dummy_disposition ~ na_prop + na_trandep + na_trandur +
+                      na_met + na_metratio + na_umag + na_gmag + na_rmag +
+                      na_imag + na_zmag
+                    , data = data_modelos_mad, family = binomial)
+```
+
+```{r}
+summary(modelo_logit)
+```
+
+```{r}
+# Probabilidades
+data_modelos_mad$prob_logit <- predict(modelo_logit, type = "response")
+
+data_modelos_mad$pred_logit <- ifelse(data_modelos_mad$prob_logit > 0.5, 1, 0)
+
+library(pROC)
+roc_logit <- roc(data_modelos_mad$dummy_disposition, data_modelos_mad$prob_logit)
+auc(roc_logit)
+
+# Matriz de confusión
+table(Predicho = data_modelos_mad$pred_logit,
+      Real = data_modelos_mad$dummy_disposition)
+
+```
+
+```{r}
+formula_logit <- as.formula(
+  paste("dummy_disposition ~", paste(vars_predictoras, collapse = " + "))
+)
+
+modelo_logit <- glm(formula_logit, data = data_modelos_mad, family = binomial, na.action = na.exclude)
+
+```
+
+```{r}
+data_modelos_mad$prob_logit <- predict(modelo_logit, type = "response")
+
+data_modelos_mad$pred_logit <- ifelse(data_modelos_mad$prob_logit > 0.5, 1, 0)
+
+library(pROC)
+roc_logit <- roc(data_modelos_mad$dummy_disposition, data_modelos_mad$prob_logit)
+auc(roc_logit)
+
+table(Predicho = data_modelos_mad$pred_logit,
+      Real = data_modelos_mad$dummy_disposition)
+
+```

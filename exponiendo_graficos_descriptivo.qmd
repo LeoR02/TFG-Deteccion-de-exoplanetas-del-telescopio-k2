@@ -1,0 +1,882 @@
+---
+title: "Análisis descriptivo"
+author: "Leo Rodríguez"
+toc: true
+toc-depth: 4
+toc-location: left
+format: html
+editor: visual
+self-contained: true
+---
+
+# librerias
+
+```{r, warning= FALSE, message= FALSE}
+library(ggplot2) #gráficos
+library(tidyr) #datos tidy
+library(patchwork) #pegar gráficos
+library(dplyr)
+library(forcats)
+library(vcd) #mosaico
+library(RColorBrewer) #colores en visualizaciones
+library(astrolibR) 
+library(lsr) #test V de Cramer
+library(knitr) #tablas bonitas
+library(kableExtra) #tablas
+library(webshot2) #guardar tablas
+library(gt) #tablas tambien
+library(magick)
+library(car) #leveneTest
+library(corrplot)
+```
+
+# datos
+```{r}
+load("data_modelos_conMissings.RData")
+str(data_modelos)
+```
+
+```{r}
+data_modelos$dummy_disposition <- factor(
+  data_modelos$dummy_disposition,
+  levels = c("No Exoplaneta","Exoplaneta")  # dif = NoExo − Exo
+)
+```
+
+# Univariado
+
+## Continuas
+
+```{r}
+#func. asimetria
+# Coeficiente de asimetría (skewness)
+skewness_vec <- function(x, na.rm = TRUE, bias_corrected = TRUE) {
+  if (na.rm) x <- x[!is.na(x)]
+  x <- as.numeric(x)
+  n <- length(x)
+  if (n < 3) return(NA_real_)
+  m  <- mean(x)
+  s  <- sd(x)
+  if (!is.finite(s) || s == 0) return(NA_real_)
+  g1 <- mean(((x - m) / s)^3)# momento estandarizado de orden 3
+  if (!bias_corrected) return(g1)
+  sqrt(n * (n - 1)) / (n - 2) * g1  # corrección por sesgo (Fisher)
+}
+
+```
+
+
+```{r}
+listconti <- c("st_teff", "st_rad", "st_mass", 
+"st_met", "st_logg", "sy_pm","sy_dist", "sy_bmag", "sy_vmag", "sy_jmag", 
+"sy_hmag", "sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", "sy_imag", 
+"sy_zmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag",
+"sy_gaiamag", "sy_tmag","sy_kepmag")
+
+# Función resumen para variables continuas (numéricas)
+summary_continuous_df <- function(df) {
+  if (!all(sapply(df, is.numeric))) {
+    stop("Todas las variables del dataframe deben ser numéricas")
+  }
+  
+  resumen <- lapply(names(df), function(var) {
+    x <- df[[var]]
+    data.frame(
+      variable = var,
+      media = mean(x, na.rm = TRUE),
+      mediana = median(x, na.rm = TRUE),
+      sd = sd(x, na.rm = TRUE),
+      IQR = quantile(x, na.rm = T)[[4]] - quantile(x, na.rm = T)[[2]],
+      min = min(x, na.rm = TRUE),
+      max = max(x, na.rm = TRUE),
+      asimetria = skewness_vec(x, na.rm = TRUE, bias_corrected = TRUE),
+      stringsAsFactors = FALSE
+    )
+  })
+  
+  resultado <- do.call(rbind, resumen)
+  return(resultado)
+}
+
+resumen_continuas <- summary_continuous_df(data_modelos[listconti])
+print(resumen_continuas)
+```
+
+
+```{r}
+# Eliminar columna na_count
+resumen_sin_na <- resumen_continuas[, setdiff(names(resumen_continuas), "na_count")]
+
+# Redondear columnas numéricas a 2 decimales
+cols_num <- sapply(resumen_sin_na, is.numeric)
+resumen_sin_na[ , cols_num] <- round(resumen_sin_na[ , cols_num], 2)
+
+# Exportar a portapapeles 
+write.table(resumen_sin_na, file = "clipboard", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+
+### distribuciones
+```{r}
+plot_distrib_listconti <- function(df, vars, ncol = 4, bins = 30, trans = NULL) {
+  stopifnot(all(vars %in% names(df)))
+  
+  librs <- c("dplyr", "tidyr", "ggplot2")
+  invisible(lapply(librs, require, character.only = TRUE))
+  
+  long <- df |>
+    dplyr::select(dplyr::all_of(vars)) |>
+    tidyr::pivot_longer(dplyr::everything(),
+                        names_to = "variable",
+                        values_to = "value") |>
+    dplyr::filter(!is.na(value))
+  
+  stats <- long |>
+    dplyr::group_by(variable) |>
+    dplyr::summarise(
+      n = dplyr::n(),
+      mean = mean(value),
+      median = median(value),
+      .groups = "drop"
+    )
+  
+  p <- ggplot(long, aes(x = value)) +
+    geom_histogram(aes(y = after_stat(density)),
+                   bins = bins, fill = "#41B6C4",
+                   alpha = 0.65, color = "white") +
+    geom_density(linewidth = 0.8) +
+    geom_vline(data = stats, aes(xintercept = mean),
+               linetype = "dashed", linewidth = 0.5, color = "#E40C01") +
+    geom_vline(data = stats, aes(xintercept = median),
+               linetype = "dotted", linewidth = 0.6, color = "#31a354") +
+    facet_wrap(~ variable, scales = "free", ncol = ncol) +
+    labs(
+      title = "Distribuciones univariantes (variables continuas)",
+      subtitle = "Histograma (densidad) con líneas de media (— —) y mediana (..)",
+      x = NULL, y = "Densidad"
+    ) +
+    theme_minimal(base_size = 13) +
+    theme(
+      plot.title = element_text(face = "bold"),
+      strip.text = element_text(face = "bold")
+    )
+  
+  if (!is.null(trans)) {
+    # Ejemplos de uso: trans = "log1p", "log10"
+    p <- p + scale_x_continuous(trans = trans)
+  }
+  
+  return(p)
+}
+
+p_listconti <- plot_distrib_listconti(
+  df = data_modelos,
+  vars = listconti,
+  ncol = 4,        
+  bins = 30,      
+  trans = NULL#sin transformación
+)
+
+p_listconti
+ggsave("distrib_listconti.png", p_listconti, width = 16, height = 12, dpi = 300)
+
+```
+
+```{r}
+
+kurtosis_vec <- function(x, na.rm = FALSE,
+                         type = c("excess", "pearson"),
+                         bias_corrected = TRUE) {
+  type <- match.arg(type)
+  if (na.rm) x <- x[!is.na(x)]
+  x <- as.numeric(x)
+  n <- length(x)
+  if (n < 4) return(NA_real_)
+  
+  mu <- mean(x)
+  m2 <- mean((x - mu)^2)
+  m4 <- mean((x - mu)^4)
+  if (m2 <= 0) return(NA_real_)
+  
+  g2 <- m4 / (m2^2) - 3
+  
+  if (bias_corrected) {
+    g2 <- ((n - 1) * ((n + 1) * g2 + 6)) / ((n - 2) * (n - 3))
+  }
+  
+  g2
+}
+
+kurtosis_table <- function(df, vars, na.rm = TRUE,
+                           type = "excess", bias_corrected = TRUE) {
+  stopifnot(all(vars %in% names(df)))
+  vals <- sapply(vars, function(v)
+    kurtosis_vec(df[[v]], na.rm = na.rm,
+                 type = type, bias_corrected = bias_corrected))
+  data.frame(variable = vars, kurtosis = as.numeric(vals), row.names = NULL)
+}
+
+k_excess <- kurtosis_table(data_modelos, listconti, type = "excess", bias_corrected = TRUE)
+
+
+resumen_continuas <- summary_continuous_df(data_modelos[listconti])
+resumen_continuas <- merge(resumen_continuas, k_excess, by = "variable", all.x = TRUE)
+
+```
+
+## Discretas
+
+```{r}
+listdiscr <- c("st_metratio", "dummy_disposition")
+```
+
+```{r}
+summary_categorical_df <- function(df) {
+  # Filtrar solo columnas categóricas
+  df_cat <- df[, sapply(df, function(x) is.factor(x) | is.character(x)), drop = FALSE]
+  
+  resumen <- lapply(names(df_cat), function(var) {
+    x <- df_cat[[var]]
+    tabla <- table(x)
+    tabla <- sort(tabla, decreasing = TRUE)
+    data.frame(
+      variable = var,
+      n_niveles = length(unique(x)),
+      nivel_mas_frecuente = names(tabla)[1],
+      frecuencia = as.integer(tabla[1]),
+      na_count = sum(is.na(x)),
+      stringsAsFactors = FALSE
+    )
+  })
+  resultado <- do.call(rbind, resumen)
+  return(resultado)
+}
+
+resumen_categoricas <- summary_categorical_df(data_modelos[listdiscr])
+
+resumen_cat_sin_na <- resumen_categoricas[, setdiff(names(resumen_categoricas), "na_count")]
+write.table(resumen_cat_sin_na, file = "clipboard", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+variable	n_niveles	nivel_mas_frecuente	frecuencia
+st_metratio	3	[Fe/H]	416
+dummy_disposition	2	Exoplaneta	577
+
+```{r}
+library(ggplot2)
+library(scales) # para porcentajes
+
+ggplot(data_modelos, aes(x = dummy_disposition)) +
+  geom_bar(fill = "#2C7FB8", alpha = 0.8) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, size = 5) +
+  labs(title = "Distribución de dummy_disposition",
+       x = "Dummy Disposition",
+       y = "Número de observaciones") +
+  theme_minimal(base_size = 15) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+ggplot(data_modelos, aes(x = st_metratio)) +
+  geom_bar(fill = "#41B6C4", alpha = 0.8) +
+  geom_text(stat = "count", aes(label = scales::percent(..count../sum(..count..))), vjust = -0.5, size = 5) +
+  labs(title = "Distribución de st_metratio",
+       x = "st_metratio",
+       y = "Número de observaciones") +
+  theme_minimal(base_size = 15) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+```
+```{r}
+library(ggplot2)
+library(scales)
+
+# Filtrar filas sin NA en dummy_disposition
+data_no_na_dummy <- data_modelos[!is.na(data_modelos$dummy_disposition), ]
+
+ggplot(data_no_na_dummy, aes(x = dummy_disposition)) +
+  geom_bar(fill = "#2C7FB8", alpha = 0.8) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, size = 5) +
+  labs(title = "Distribución de dummy_disposition",
+       x = "Dummy Disposition",
+       y = "Número de observaciones") +
+  expand_limits(y = max(table(data_no_na_dummy$dummy_disposition)) * 1.15) + 
+  theme_minimal(base_size = 15) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+
+# Para st_metratio (filtrar NA)
+data_no_na_metratio <- data_modelos[!is.na(data_modelos$st_metratio), ]
+
+ggplot(data_no_na_metratio, aes(x = st_metratio)) +
+  geom_bar(fill = "#2C7FB8", alpha = 0.8) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5, size = 5) +
+  labs(title = "Distribución de st_metratio",
+       x = "st_metratio",
+       y = "Número de observaciones") +
+  expand_limits(y = max(table(data_no_na_metratio$st_metratio)) * 1.15) + # espacio extra arriba
+  theme_minimal(base_size = 15) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+```
+
+# Bivariado
+```{r}
+vars <- c("st_mass","st_logg","st_met","st_rad","st_teff",
+          "sy_pm","sy_dist","sy_bmag","sy_vmag","sy_tmag","sy_gaiamag")
+
+rangos_n <- sapply(vars, function(v){
+  tapply(!is.na(data_modelos[[v]]), data_modelos$dummy_disposition, sum)
+})
+apply(rangos_n, 1, function(x) c(min=min(x), max=max(x)))
+
+```
+
+```{r}
+colores_spectral <- brewer.pal(11,"Spectral")
+colores_paleta_spectral <- list(
+  Exoplaneta = colores_spectral[8],
+  noExoplaneta = colores_spectral[3],
+  puntos = colores_spectral[6]
+)
+
+datos_filtrados <- na.omit(data_modelos)
+```
+
+## st_mass x dummy_disposition
+
+```{r}
+datos_filtrados <- data_modelos |> 
+  filter(!is.na(st_mass))
+
+ggplot(datos_filtrados, aes(x = st_mass, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Masa estelar (M☉)", y = "Densidad",
+       title = "Distribución de masa estelar por estado de confirmación") +
+  theme_minimal()
+ggsave("st_mass_dummy_disposition.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(st_mass ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+
+
+## sy_pm x dummy_disposition
+
+```{r}
+datos_filtrados <- data_modelos |> 
+  filter(!is.na(sy_pm))
+
+ggplot(datos_filtrados,
+       aes(x = log1p(sy_pm), fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta,
+                               colores_paleta_spectral$Exoplaneta),
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "log(sy_pm + 1) [mas/año]", y = "Densidad",
+       title = "Distribución de velocidad del sistema planetario por estado") +
+  theme_minimal()
+
+
+ggsave("pm_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(log1p(sy_pm) ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_dist x dummy_disposition
+
+```{r}
+datos_filtrados <- data_modelos |> 
+  filter(!is.na(sy_dist))
+
+ggplot(datos_filtrados, aes(x = log1p(sy_dist), fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "log(sy_dist +1) [parsecs]", y = "Densidad",
+       title = "Distribución de distancia al sistema planetario por estado de confirmación") +
+  theme_minimal()
+ggsave("dist_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+```{r}
+t.test(log1p(sy_dist) ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+
+```
+
+## st_logg x dummy_disposition
+
+```{r}
+ggplot(datos_filtrados, aes(x = st_logg, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Aceleración gravitario [cm/s^2]", y = "Densidad",
+       title = "Distribución de aceleración gravitatoria por estado de confirmación") +
+  theme_minimal()
+ggsave("logg_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(st_logg ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## st_met x dummy_disposition
+
+```{r}
+ggplot(datos_filtrados, aes(x = st_met, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Metalicidad estelar [dex]", y = "Densidad",
+       title = "Distribución de la metalicidad estelar por estado de confirmación") +
+  theme_minimal()
+ggsave("met_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(st_met ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## st_rad x dummy_dispostion
+
+```{r}
+ggplot(datos_filtrados, aes(x = log1p(st_rad), fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Distancia desde el centro de la estrella hasta la superficie [R☉]", y = "Densidad",
+       title = "Distribución del log-radio de la estrella por estado de confirmación") +
+  theme_minimal()
+ggsave("rad_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(log1p(st_rad) ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## st_teff x dummy_disposition
+
+```{r}
+ggplot(datos_filtrados, aes(x = st_teff, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "Temperatura de la estrella [k]", y = "Densidad",
+       title = "Distribución de la temperatura de la estrella por estado de confirmación") +
+  theme_minimal()
+ggsave("teff_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(st_teff ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_bmag x dummy_disposition
+
+```{r}
+ggplot(datos_filtrados, aes(x = sy_bmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema planetario medido en la banda B", y = "Densidad",
+       title = "Distribución del brillo azul visible según estado de confirmación") +
+  theme_minimal()
+ggsave("bmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_bmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_vmag x dummy_disposition
+
+
+```{r}
+ggplot(datos_filtrados, aes(x = sy_vmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda V", y = "Densidad",
+       title = "Distribución del brillo verde visible según estado de confirmación") +
+  theme_minimal()
+ggsave("vmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_vmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+
+## sy_tmag x dummy_disposition
+
+
+```{r}
+ggplot(datos_filtrados, aes(x = sy_tmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema de la banda TESS", y = "Densidad",
+       title = "Distribución de la banda TESS según estado de confirmación") +
+  theme_minimal()
+ggsave("tmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_tmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_gaiamag x dummy_disposition
+
+
+```{r}
+ggplot(datos_filtrados, aes(x = sy_gaiamag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda Gaia", y = "Densidad",
+       title = "Distribución del brillo medido en la banda Gaia según estado de confirmación") +
+  theme_minimal()
+ggsave("gaiamag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_gaiamag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+# ANEXO
+
+## sy_jmag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_jmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda J", y = "Densidad",
+       title = "Distribución del brillo medido en la banda J según estado de confirmación") +
+  theme_minimal()
+ggsave("jmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_jmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_hmag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_hmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda H", y = "Densidad",
+       title = "Distribución del brillo medido en la banda H según estado de confirmación") +
+  theme_minimal()
+ggsave("hmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_hmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_kmag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_kmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda Ks", y = "Densidad",
+       title = "Distribución del brillo medido en la banda Ks según estado de confirmación") +
+  theme_minimal()
+ggsave("kmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_kmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_umag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_umag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda U", y = "Densidad",
+       title = "Distribución del brillo medido en la banda U según estado de confirmación") +
+  theme_minimal()
+ggsave("umag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_umag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_gmag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_gmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda G", y = "Densidad",
+       title = "Distribución del brillo medido en la banda G según estado de confirmación") +
+  theme_minimal()
+ggsave("gmagg_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_gmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_rmag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_rmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda R", y = "Densidad",
+       title = "Distribución del brillo medido en la banda R según estado de confirmación") +
+  theme_minimal()
+ggsave("rmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_rmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_imag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_imag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda I", y = "Densidad",
+       title = "Distribución del brillo medido en la banda I según estado de confirmación") +
+  theme_minimal()
+ggsave("imag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_imag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_zmag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_zmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda Z", y = "Densidad",
+       title = "Distribución del brillo medido en la banda Z según estado de confirmación") +
+  theme_minimal()
+ggsave("zmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_zmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_w1mag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_w1mag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda W1", y = "Densidad",
+       title = "Distribución del brillo medido en la banda W! según estado de confirmación") +
+  theme_minimal()
+ggsave("w1mag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_w1mag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_w2mag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_w2mag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda W2", y = "Densidad",
+       title = "Distribución del brillo medido en la banda W2 según estado de confirmación") +
+  theme_minimal()
+ggsave("w2mag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_w2mag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_w3mag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_w3mag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda W3", y = "Densidad",
+       title = "Distribución del brillo medido en la banda W3 según estado de confirmación") +
+  theme_minimal()
+ggsave("w3mag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_w3mag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_w4mag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_w4mag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda W4", y = "Densidad",
+       title = "Distribución del brillo medido en la banda W4 según estado de confirmación") +
+  theme_minimal()
+ggsave("w4mag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_w4mag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## sy_kepmag
+
+```{r}
+ggplot(data_modelos, aes(x = sy_kepmag, fill = factor(dummy_disposition))) +
+  geom_density(alpha = 0.6, adjust = 1.5) +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(x = "brillo del sistema centrado en la banda del telescopio Kepler", y = "Densidad",
+       title = "Distribución del brillo medido en la banda del telescopio Kepler según estado de confirmación") +
+  theme_minimal()
+ggsave("kepmag_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+t.test(sy_kepmag ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+
+# Eliminados del estudio
+
+## st_metratio x dummy_disposition
+
+```{r}
+conteo <- data_modelos %>%
+  filter(!is.na(st_metratio)) %>%
+  group_by(st_metratio, dummy_disposition) %>%
+  summarise(cantidad = n(), .groups = "drop")
+
+# Gráfico de barras agrupadas
+ggplot(conteo, aes(x = st_metratio, y = cantidad, fill = dummy_disposition)) +
+  geom_col(position = "dodge", color = "black") +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta), 
+                    labels = c("No Exoplaneta", "Exoplaneta")) +
+  labs(
+    x = "Tipo de metalicidad estelar (st_metratio)",
+    y = "Cantidad de observaciones",
+    fill = "Estado (dummy_disposition)",
+    title = "Distribución de st_metratio agrupada por dummy_disposition"
+  ) +
+  theme_minimal()
+ggsave("metratio_por_dummy.PNG", width = 8, height = 6, dpi = 300)
+
+```
+
+```{r}
+tabla <- table(data_modelos$st_metratio, data_modelos$dummy_disposition)
+chisq.test(tabla)
+```
+
+
+## pl_trandep x dummy_disposition
+
+```{r}
+datos_filtrados <- data_modelos |> 
+  filter(!is.na(pl_trandep))
+
+ggplot(datos_filtrados, aes(x = pl_trandep, fill = dummy_disposition)) +
+  geom_density(alpha = 0.6) +
+  scale_x_continuous(trans = "log1p") + 
+    annotation_logticks(sides = "b") +
+    scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  labs(x = "Profundidad de tránsito (log-scale)", y = "Densidad",
+       title = "Distribución de profundidad de tránsito por estado") +
+  theme_minimal()
+
+ggsave("trandep_dummy.png", width = 8, height = 6, dpi = 300)
+```
+```{r}
+t.test(pl_trandep ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## pl_rade x dummy_disposition
+
+```{r}
+ggplot(data_modelos, aes(x = factor(dummy_disposition), y = pl_rade, fill = factor(dummy_disposition))) +
+  geom_boxplot() +
+      scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  labs(x = "Estado (dummy_disposition)", y = "Radio del planeta (pl_rade)", title = "Distribución de radio planetario por estado") +
+  theme_minimal()
+
+```
+```{r}
+t.test(pl_rade ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```
+
+## pl_orbper x dummy_disposition
+
+```{r}
+datos_filtrados <- data_modelos |> 
+  filter(pl_orbper < 250)
+
+ggplot(datos_filtrados, aes(x = factor(dummy_disposition), y = pl_orbper, fill = factor(dummy_disposition))) +
+  geom_boxplot() +
+  scale_fill_manual(values = c(colores_paleta_spectral$noExoplaneta, colores_paleta_spectral$Exoplaneta))+ 
+  labs(x = "Estado (dummy_disposition)", y = "Radio del planeta (pl_rade)", title = "Distribución de radio planetario por estado") +
+  theme_minimal()
+
+ggsave("orbper_dummy.png", width = 8, height = 6, dpi = 300)
+
+```
+```{r}
+t.test(pl_orbper ~ dummy_disposition, data = data_modelos, var.equal = FALSE)
+```

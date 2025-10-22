@@ -1,0 +1,319 @@
+---
+title: "Resumen imputación"
+author: "Leo Rodríguez"
+toc: true
+toc-depth: 4
+toc-location: left
+format: html
+editor: visual
+self-contained: true
+---
+
+# Librerias
+
+```{r, warning=FALSE, message=FALSE,collapse=TRUE}
+library(mice) #imputacion
+library(CALIBERrfimpute)
+library(dplyr) #trat. datos
+library(purrr)
+library(missForest) #imputacion
+library(ggplot2)
+library(RColorBrewer) #colores en visualizaciones
+library(naniar) #valores miss
+library(caret)  #CV
+library(randomForest)
+library(gridExtra)
+
+library(VIM) #valores missing
+library(patchwork) #gráficos
+
+library(doParallel)
+cluster <- makeCluster(detectCores()- 1)
+registerDoParallel(cluster)
+```
+
+# datos
+
+```{r}
+load("data_modelos_mad.rdata") #BBDD incial, limpia de outliers
+```
+
+Antes de imputar, se eliman las variables que no sirven y se han colado
+
+```{r}
+data_modelos_mad$sy_pmra <- NULL
+data_modelos_mad$sy_pmdec <- NULL
+```
+
+Analizando las variables, se descubrió que las de tipo planetario pl_*, pueden derviar en data leakage debido a que son más precisas en exoplanetas confirmados.
+La variable st_metratio, no es una variable física de estudio, si no un clasificador que no debe ser insertado en el modelo principal.
+
+```{r}
+data_modelos_mad$pl_orbper <- NULL
+data_modelos_mad$pl_rade <- NULL
+data_modelos_mad$pl_trandep <- NULL
+data_modelos_mad$pl_trandur <- NULL
+data_modelos_mad$st_metratio <- NULL
+```
+
+# flujo de imputación completo
+
+## árboles
+
+```{r}
+#parametros para el RF
+setRFoptions(ntree_cat = 100, ntree_cont = 100)
+```
+
+```{r}
+#Asegurar los tipos de variables
+data_modelos_mad$pl_name <- as.character(data_modelos_mad$pl_name)
+data_modelos_mad$dummy_disposition <- factor(data_modelos_mad$dummy_disposition)
+
+num_vars <- setdiff(names(data_modelos_mad), c("pl_name","dummy_disposition"))
+data_modelos_mad[num_vars] <- lapply(data_modelos_mad[num_vars], function(x) as.numeric(as.character(x)))
+
+
+#Configuramos mice para que no impute orig_row (método vacío)
+predM <- make.predictorMatrix(data_modelos_mad)
+predM["pl_name", ] <- 0
+predM[, "pl_name"] <- 0
+
+#Configuramos de igual manera para que no impute dummy_disposition ni impute con la misma
+predM["dummy_disposition", ]<- 0
+predM[, "dummy_disposition"] <- 0
+
+#transformamos la variable pl_trandep a tanto por uno
+#data_modelos_mad$pl_trandep <- data_modelos_mad$pl_trandep/100 YA NO EXISTE
+
+methods <- ifelse(sapply(data_modelos_mad, is.factor), "rfcat", "rfcont")
+methods["dummy_disposition"] <- ""
+methods["pl_name"] <- ""
+```
+
+```{r, eval=FALSE}
+#POR PRECAUCION SE BORRAN VARIABLES AUXILIARES DE NA, evito leakage
+data_modelos_mad <- data_modelos_mad[, !grepl("^na_", names(data_modelos_mad))]
+
+imp_mult_mad3 <- mice(data_modelos_mad, 
+                      method = methods, predictorMatrix = predM,
+                      m = 5, maxit = 5, seed = 123, printFlag = T)
+```
+
+```{r, eval=FALSE}
+save(imp_mult_mad3, file = "imp_mult_mad_final.rdata")
+```
+
+
+```{r}
+load("imp_mult_mad_final.rdata")
+stripplot(imp_mult_mad3, sy_pm ~ .imp, pch = 20, cex = 1.2) #variable con algún valor erroneo
+```
+
+```{r}
+#numero de imputados por variable 
+sapply(imp_mult_mad3$imp, nrow)
+
+vars <- c( "st_teff", "st_rad", "st_mass", "st_met", "st_logg", 
+"sy_pm", "sy_dist", "sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", 
+"sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", 
+"sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", 
+"sy_kepmag")
+
+#vars <- c("pl_orbper", "pl_rade", "pl_trandep", "pl_trandur", 
+#"st_teff", "st_rad", "st_mass", "st_met", "st_metratio", "st_logg", 
+#"sy_pm", "sy_dist", "sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", 
+#"sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", 
+#"sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", 
+#"sy_tmag", "sy_kepmag")
+
+for (var in vars) {
+    g1 <- densityplot(imp_mult_mad3, as.formula(paste0("~", var)), main = paste("Densidad de", var))
+    g2 <- stripplot(imp_mult_mad3, as.formula(paste0(var, " ~ .imp")), pch = 20, cex = 1.2)
+    grid.arrange(g1,g2,ncol = 2)
+}
+
+```
+
+
+```{r, eval = FALSE}
+#| echo: false
+#Como podemos obsevar, la variable pl_trandep ha tomado valores negativos. Lo que es imposible debido a su definción.
+#Por tanto, truncaremos los valores negativos a cero.
+
+for (i in 1:5) {
+  imp_mult_mad3$imp$pl_trandep[[i]] <- pmax(0, pmin(1, imp_mult_mad3$imp$pl_trandep[[i]]))
+}
+
+library(gridExtra)
+
+g1 <- densityplot(imp_mult_mad3, ~pl_trandep, main = "pl_trandep")
+g2 <- stripplot(imp_mult_mad3, pl_trandep ~ .imp, pch = 20, cex = 1.2)
+grid.arrange(g1,g2, ncol = 2)
+```
+
+```{r, eval=FALSE}
+#| echo: false
+#Para la variable pl_rade encontramos también valores negativos, claramente imposibles habalndo de radios de objetos celestes, Es fisicamente imposible que un objeto candidato tenga un radio inferior a 0.1 radios terrestres, por tanto, se truncará hasta 0.5
+for (i in 1:5) {
+  imp_mult_mad3$imp$pl_rade[[i]] <- pmax(0.5, imp_mult_mad3$imp$pl_rade[[i]])
+  }
+
+library(gridExtra)
+
+g1 <- densityplot(imp_mult_mad3, ~pl_rade, main = "pl_rade")
+g2 <- stripplot(imp_mult_mad3, pl_rade ~ .imp, pch = 20, cex = 1.2)
+grid.arrange(g1,g2, ncol = 2)
+```
+
+
+
+```{r, eval=FALSE}
+#| echo: false
+#Para la variable pl_orbper, existen un par de observaciones menores a 0, evidentemente imposibles, por tanto se truncarán a 0.1 (ya que no tiene sentido un valor de 0)
+for (i in 1:5) {
+  imp_mult_mad3$imp$pl_orbper[[i]] <- pmax(0.1, imp_mult_mad3$imp$pl_orbper[[i]])
+  }
+
+library(gridExtra)
+
+g1 <- densityplot(imp_mult_mad3, ~pl_orbper, main = "pl_orbper")
+g2 <- stripplot(imp_mult_mad3, pl_orbper ~ .imp, pch = 20, cex = 1.2)
+grid.arrange(g1,g2, ncol = 2)
+```
+
+
+```{r, eval=FALSE, }
+#| echo: false
+#Una vez truncados los valores, podemos observar que se mantiene la distribución de la variable tras la imputación.
+#Continuando con la varibale pl_trandur vemos imputaciones negativas, que tampoco tienen sentido.
+for (i in 1:5) {
+  imp_mult_mad3$imp$pl_trandur[[i]] <- pmax(0, imp_mult_mad3$imp$pl_trandur[[i]])
+  }
+
+library(gridExtra)
+
+g1 <- densityplot(imp_mult_mad3, ~pl_trandur, main = "pl_trandur")
+g2 <- stripplot(imp_mult_mad3, pl_trandur ~ .imp, pch = 20, cex = 1.2)
+grid.arrange(g1,g2, ncol = 2)
+```
+
+La última variable en la que encontramos imputaciones erroneas para la definición de la variable es sy_pm con valores negativos.
+
+```{r}
+for (i in 1:5) {
+  imp_mult_mad3$imp$sy_pm[[i]] <- pmax(0, imp_mult_mad3$imp$sy_pm[[i]])
+  }
+
+library(gridExtra)
+
+g1 <- densityplot(imp_mult_mad3, ~sy_pm, main = "sy_pm")
+g2 <- stripplot(imp_mult_mad3, sy_pm ~ .imp, pch = 20, cex = 1.2)
+grid.arrange(g1,g2, ncol = 2)
+```
+
+```{r, eval=FALSE}
+# guardamos el dataset truncado
+save(imp_mult_mad3, file = "imp_mult_mad3_truncado_final.rdata")
+```
+
+
+```{r}
+load("imp_mult_mad3_truncado_final.rdata")
+plot(imp_mult_mad3, c("st_logg","st_met","sy_umag","sy_gmag","sy_rmag","sy_imag","sy_zmag"))
+plot(imp_mult_mad3)
+```
+
+```{r}
+library(mice)
+library(latticeExtra)   # install.packages("latticeExtra") si no lo tienes
+
+vars <- c("st_logg","st_met","sy_umag","sy_gmag","sy_rmag","sy_imag","sy_zmag")
+
+# Un trellis por variable, con tiras renombradas y líneas más gruesas
+plist <- lapply(vars, function(v){
+  plot(imp_mult_mad3, v) |>
+    update(
+      par.strip.text = list(cex = 0.85),
+      strip = strip.custom(factor.levels = c(paste("mean", v), paste("sd", v))),
+      par.settings = simpleTheme(lwd = 1.4)  # líneas más visibles
+    )
+})
+
+# Concatenar TODOS en un solo trellis: 2 columnas (mean/sd) x 7 filas
+p_all <- do.call(c, c(plist, list(layout = c(2, length(plist)))))
+
+# Guarda en ALTA altura para que no se “aplane”
+png("convergencia_mice_todo.png", width = 2400, height = 4200, res = 300)
+print(p_all)
+dev.off()
+
+# (Opcional) vectorial para el TFG
+pdf("convergencia_mice_todo.pdf", width = 10, height = 16)  # pulgadas
+print(p_all)
+dev.off()
+
+
+```
+
+# graficamos
+
+```{r}
+
+# Lista con las variables relevantes
+vars_relevantes <- c("st_logg","st_teff", "st_rad", "st_mass", "sy_umag", "sy_gmag")
+
+# Generar y mostrar densityplots para cada variable
+for (var in vars_relevantes) {
+  print(
+    densityplot(imp_mult_mad3, as.formula(paste0("~", var)), main = paste("Densidad de", var))
+  )
+}
+
+
+```
+
+```{r, eval=FALSE}
+#| echo: false
+# guardar los gráficos
+setwd("C:/Users/rodri/Desktop/Estadística_Leo/tfg/exoplanetas/BBDD_explicando/densidades_IM_final")
+for (var in vars_relevantes) {
+  png(filename = paste0("densityplot_", var, ".png"), width = 800, height = 600)
+  print(
+    densityplot(imp_mult_mad3, as.formula(paste0("~", var)), main = paste("Densidad de", var))
+  )
+  dev.off()
+}
+
+```
+```{r}
+vars_relevantes <- c("st_logg","st_met","sy_umag","sy_gmag","sy_rmag","sy_imag","sy_zmag")
+
+plots <- lapply(vars_relevantes, function(var) {
+  g1 <- densityplot(imp_mult_mad3, as.formula(paste0("~", var)), main = paste("Densidad de", var))
+    g2 <- stripplot(imp_mult_mad3, as.formula(paste0(var, " ~ .imp")), pch = 20, cex = 1.2)
+    grid.arrange(g1,g2,ncol = 2)
+})
+grid.arrange(grobs = plots, ncol = 3)
+```
+
+```{r}
+library(mice)
+library(ggplot2)
+library(gridExtra)
+
+for (var in vars) {
+    g1 <- densityplot(imp_mult_mad3, as.formula(paste0("~", var)), main = paste("Densidad de", var))
+    g2 <- stripplot(imp_mult_mad3, as.formula(paste0(var, " ~ .imp")), pch = 20, cex = 1.2)
+    grid.arrange(g1,g2,ncol = 2)
+}
+# Crear lista con gráficos densityplot
+plots <- lapply(vars_relevantes, function(var) {
+  densityplot(imp_mult_mad3, as.formula(paste0("~", var)), main = paste("Densidad de", var))
+})
+
+# Mostrar en una figura 2 columnas y 3 filas (6 gráficos)
+grid.arrange(grobs = plots, ncol = 2)
+
+```
+

@@ -1,0 +1,1751 @@
+---
+title: "Modelos final"
+author: "Leo Rodríguez"
+toc: true
+toc-depth: 4
+toc-location: left
+format: html
+editor: visual
+self-contained: true
+---
+
+# Librerias 
+
+```{r, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(mice)
+library(miceadds)
+library(miceafter)
+library(RColorBrewer)
+library(corrplot)
+library(tidyr)
+library(dplyr)
+library(broom)  # para tidy output
+library(purrr) 
+library(psych)
+library(factoextra) #pca
+library(missMDA)   # Para PCA con datos imputados
+library(FactoMineR) # Para ACP
+library(glmnet) #penalizacion
+library(caret)
+library(randomForest)
+library(pROC)
+```
+
+```{r}
+#reproducibilidad
+RNGkind("L'Ecuyer-CMRG") 
+set.seed(123)
+```
+
+# Datos
+
+```{r}
+load("data_modelos_mad.rdata")
+load("imp_mult_mad3_truncado_final.rdata")
+```
+
+:::{.callout-important}
+No se usará división en train y test ya que solo se dispone de 589 observaciones
+los modelos se evaluarán mediante CV k-fold, de esta manera, no "restringimos" 
+información que podria ser relavante para el modelo con el grupo de test y podemos
+evaluar perfectamente en cada grupo imputado el funcionamiento del modelo.
+:::
+
+
+# Problema de multicolinealidad
+
+Primero vamos a analizar la correlación de las variables.
+
+```{r}
+listconti <- c("st_teff", "st_rad", "st_mass", "st_met", "st_logg", 
+"sy_pm", "sy_dist", "sy_bmag", "sy_vmag", 
+"sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", 
+"sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", 
+"sy_gaiamag", "sy_tmag", "sy_kepmag")
+
+datasets_completos <- complete(imp_mult_mad3, "all")
+
+# Ejemplo en primer dataset imputado
+df <- datasets_completos[[1]] %>% dplyr::select(-dummy_disposition)
+cor_mat <- cor(df[listconti], use = "pairwise.complete.obs")
+
+to_remove <- findCorrelation(cor_mat, cutoff = 0.9, names = TRUE)
+
+cor_matrix <- cor(data_modelos_mad[,listconti], use = "pairwise.complete.obs")
+
+variables_ordenadas <- c(
+  # Vbles no fotométricas
+  "st_teff","st_rad", "st_mass", "st_met", "st_logg", "sy_pm", "sy_dist",
+  # UV/Visible
+  "sy_umag", "sy_bmag", "sy_gmag", "sy_vmag", "sy_rmag", "sy_imag",
+  # Infrarrojo cercano
+  "sy_zmag", "sy_jmag", "sy_hmag", "sy_kmag",
+  # Infrarrojo lejano
+  "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag",
+  # Bandas específicas de misiones
+  "sy_gaiamag", "sy_tmag", "sy_kepmag"
+)
+
+cor_matrix_ordenada <- cor_matrix[variables_ordenadas, variables_ordenadas]
+
+col <- rev(brewer.pal(n = 11, name = "RdYlBu"))
+
+# Crear el gráfico de la matriz de correlación
+correlaciones <- corrplot(cor_matrix_ordenada, 
+         method = "color",      
+         number.cex = 0.5,
+         type = "full",       
+         tl.col = "black",     
+         tl.srt = 90,         
+         tl.cex = 0.7,          
+         cl.cex = 0.7,          
+         col = col,           
+         diag = TRUE)           
+
+
+```
+```{r}
+#| echo: false
+#guardo las correlaciones
+png("correlaciones_final.png", width = 2000, height = 2000, res = 300)
+correlaciones <- corrplot(cor_matrix_ordenada, 
+         method = "number",     
+         number.cex = 0.5,
+         type = "full",       
+         tl.col = "black",      
+         tl.srt = 90,       
+         tl.cex = 0.7,          
+         cl.cex = 0.7,        
+         col = col,             
+         diag = TRUE)           
+dev.off()
+
+
+```
+
+Como podemos ver, existe gran correlación entre las variables fotométricas, y por otro lado, gran correlación entre las variables estelares.
+
+Vamos a calcular el indice VIF (Variance Inflance Factor, por sus siglas en ingles). Es un ínidce que detecta multicolinealidad entre variables independientes de un modelo de regresión.
+
+- $\text{VIF} \leq 1$ no hay multicolinealidad
+- $1 \leq \text{VIF} \geq 5$ multicolinealidad moderada
+- $\text{VIF} > 5$ multicolinealidad alta
+
+Para ello trabajamos sobre el primer dataset imputado
+
+```{r}
+datos <- complete(imp_mult_mad3,1)
+```
+
+```{r}
+library(car)
+
+# Ajustar modelo inicial
+modelo <- glm(dummy_disposition ~ st_teff+ st_rad+ st_mass+ st_met+ st_logg+ 
+sy_pm+ sy_dist+ sy_bmag+ sy_vmag+ 
+sy_jmag+ sy_hmag+ sy_kmag+ sy_umag+ sy_gmag+ sy_rmag+ 
+sy_imag+ sy_zmag+ sy_w1mag+ sy_w2mag+ sy_w3mag+ sy_w4mag+ 
+sy_gaiamag+ sy_tmag+ sy_kepmag, data = datos, family = binomial)
+
+# Calcular VIF
+vif(modelo)
+```
+
+Podemos obserevar algunas variables con niveles realmente altos de VIF, para solucionar esta alta multicolinealidad realizamos el análisis de componentes principales para resumir la información y evitar de esta forma la redundancia.
+
+## acp
+
+El análisis de componentes principales se realizará en el primer dataset imputado y se trasladarán los componentes a las k-1 (4) data set restantes. De esta forma nos aseguramos de la reproducibilidad.
+
+### acp en fotometria
+
+En este caso, las variables tienen todas las mismas medidas, pero por seguridad y comodidad se escalaran los datos.
+
+```{r}
+bandas <- c("sy_bmag", "sy_vmag", 
+"sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", 
+"sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", 
+"sy_gaiamag", "sy_tmag", "sy_kepmag")
+
+datos_mag <- datos[bandas]
+
+pca_mag <- prcomp(datos_mag, center = TRUE, scale. = TRUE)
+cor(pca_mag$x)  # Matriz de correlación entre componentes principales
+fviz_eig(pca_mag, addlabels = TRUE, ylim = c(0, 80))
+summary(pca_mag) 
+```
+
+Para elegir el número óptimo de componentes principales, podemos 
+
+(i), elegir el número a partir de un porcentaje de varianza explicada fijo (80 o 90%, por ejemplo). 
+
+(ii) escoger aquellos componentes con un autovalor superior o igual a 1. 
+
+(iii) Escoger el número de autovalores al partir del cual el porcentaje de varianza explicada deja de aumentar significativamente.
+
+```{r}
+# Obtener autovalores
+autovalores <- pca_mag$sdev^2
+autovalores
+
+# Porcentaje de varianza explicada
+var_exp <- autovalores / sum(autovalores)
+var_exp
+
+# Varianza acumulada
+var_acum <- cumsum(var_exp)
+var_acum
+
+tabla_pca <- data.frame(
+  Autovalor = autovalores,
+  `Varianza Explicada` = round(var_exp * 100, 2),
+  `Varianza Acumulada` = round(var_acum * 100, 2)
+)
+tabla_pca
+
+write.table(tabla_pca, file = "clipboard", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+Como podemos ver, con dos componentes explicamos el 80% de la varianza explicada, además son aquellos dos que tiene un autovalor superior a 1.
+
+A continuación se estudia la contribución de cada banda a cada una de las dos nuevas componentes.
+
+```{r}
+fviz_pca_var(pca_mag, col.var = "contrib", repel = T, labelsize = 3)    
+# contribución de cada banda
+```
+
+
+A continuación, añadimos los componentes a los datos y eliminamos las bandas per se
+
+```{r}
+datos$PC1_mag <- pca_mag$x[, 1]
+datos$PC2_mag <- pca_mag$x[, 2]
+
+datos <- datos [, !colnames(datos) %in% bandas]
+```
+
+### acp para datos estelares
+
+Nótese, que la variable st_met queda fuera del análisis debido a que es una variable con alta calidad predictiva. Por tanto, no es óptimo perder información de la misma
+
+```{r}
+estelares <- c("st_teff","st_rad","st_mass","st_logg")
+
+datos_st <- datos[estelares]
+
+pca_st <- prcomp(datos_st, center = TRUE, scale. = TRUE)
+cor(pca_st$x) 
+fviz_eig(pca_st, addlabels = TRUE, ylim = c(0, 90))
+summary(pca_st) 
+```
+
+```{r}
+# Obtener autovalores
+autovalores <- pca_st$sdev^2
+autovalores
+
+# Porcentaje de varianza explicada
+var_exp <- autovalores / sum(autovalores)
+var_exp
+
+# Varianza acumulada
+var_acum <- cumsum(var_exp)
+var_acum
+
+tabla_pca <- data.frame(
+  Autovalor = autovalores,
+  `Varianza Explicada` = round(var_exp * 100, 2),
+  `Varianza Acumulada` = round(var_acum * 100, 2)
+)
+
+#tabla_pca
+
+write.table(round(tabla_pca,2), file = "clipboard", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+
+Como podemos ver, en este caso, necesitamos un componente para alcanzar el 84% de la varianza explicada
+
+A continuación estudiamos la contribución de cada variable estelar al componente creado
+
+```{r}
+fviz_pca_var(pca_st, col.var = "contrib", repel = T)   
+# contribución de cada variable
+```
+
+```{r}
+# ALTERNATIVA PARA MOSTRAR SOLO UNA
+load1 <- factoextra::get_pca_var(pca_st)$coord[, 1]   # cargas en CP1
+ df <- data.frame(var = names(load1), loading = load1)
+
+ ggplot(df, aes(x = reorder(var, abs(loading)), y = loading)) +
+     geom_hline(yintercept = 0, linetype = "dashed") +
+     geom_segment(aes(xend = var, y = 0, yend = loading)) +
+     geom_point() +
+     coord_flip() +
+     labs(x = NULL, y = "Carga en CP1", title = "Cargas (CP1)") +
+     theme_minimal(base_size = 12)
+```
+
+Añadimos el componente principal a la base de datos y eliminamos las variables estelares (por repetición)
+
+```{r}
+datos$PC1_st <- pca_st$x[, 1]
+
+datos <- datos [, !colnames(datos) %in% estelares]
+```
+
+## Confirmación de eliminación de multicolinealidad
+
+A continuación se observa si se ha eliminado la multicolinealidad mediante VIF, y heatmap
+
+```{r}
+datos2 <- datos[, ! names(datos) %in% c("pl_name")] 
+library(car)
+vif(glm(dummy_disposition ~ ., data = datos2, family = binomial))
+alias(glm(dummy_disposition ~ ., data = datos2, family = binomial))
+
+modelo <- glm(dummy_disposition ~ ., data = datos2, family = binomial)
+summary(modelo)
+```
+
+```{r}
+listconti2 <- c("st_met", "sy_pm", "sy_dist", "PC1_mag", "PC2_mag", "PC1_st")
+cor_matrix <- cor(datos2[,listconti2], use = "pairwise.complete.obs")
+
+# Definir una paleta de colores
+#col <- colorRampPalette(c("midnightblue", "royalblue", "white", "salmon", "darkred"))(100)
+col <- rev(brewer.pal(n = 11, name = "RdYlBu"))
+# Crear el gráfico de la matriz de correlación
+corrplot(cor_matrix, 
+         method = "color",      # Mostrar valores como colores
+         type = "full",         # Matriz completa, no solo la mitad
+         tl.col = "black",      # Color del texto de las etiquetas
+         tl.srt = 90,           # Rotación del texto de las etiquetas
+         tl.cex = 0.7,          # Tamaño del texto de las etiquetas
+         cl.cex = 0.7,          # Tamaño del texto de la leyenda
+         col = col,             # Paleta de colores
+         diag = TRUE)           # Mostrar la diagonal
+
+```
+
+## unificación acp
+
+```{r}
+datasets_completos <- complete(imp_mult_mad3, "all")
+#lista con los datasets. 
+
+# Usamos el primero para calcular el PCA
+datos_ref <- datasets_completos[[1]]
+
+# PCA fotometría
+pca_mag <- prcomp(datos_ref[, bandas], center = TRUE, scale. = TRUE)
+
+# PCA estelares
+pca_st <- prcomp(datos_ref[, estelares], center = TRUE, scale. = TRUE)
+
+aplicar_pca <- function(df) {
+  # Guardamos variables que no deben perderse
+  dispos <- df$dummy_disposition
+  name <- df$pl_name
+  
+  # PCA fotometría
+  mag_scaled <- scale(df[, bandas], center = pca_mag$center, scale = pca_mag$scale)
+  pcs_mag <- mag_scaled %*% pca_mag$rotation[, 1:2]
+  
+  # PCA estelares
+  st_scaled <- scale(df[, estelares], center = pca_st$center, scale = pca_st$scale)
+  pcs_st <- st_scaled %*% pca_st$rotation[, 1:2]
+  
+  # Reconstrucción del data set
+  df_final <- df[, !(names(df) %in% c(bandas, estelares))]
+  df_final$PC1_mag <- pcs_mag[, 1]
+  df_final$PC2_mag <- pcs_mag[, 2]
+  df_final$PC1_st <- pcs_st[, 1]
+  df_final$dummy_disposition <- dispos
+  df_final$pl_name <- name
+  
+  return(df_final)
+}
+
+# Aplicar a los 5 data sets
+datasets_con_pca <- map(datasets_completos, aplicar_pca)
+```
+
+Por precaución se convertiran los niveles de dummy_disposition a 0,1 para evitar errores en el futuro modelado
+
+```{r}
+# Convertir a factor con niveles "0" y "1" en todos los datasets de la lista
+datasets_con_pca <- lapply(datasets_con_pca, function(df) {
+  df$dummy_disposition <- ifelse(df$dummy_disposition == "Exoplaneta", "1", "0")
+  df$dummy_disposition <- factor(df$dummy_disposition, levels = c("0", "1"))
+  return(df)
+})
+
+```
+
+Por último se creará la variable host_id, que indicará el sistema planetario al que pertenece cada planeta. Este proceso se realizará mediante la variable pl_name, para cada observación quitaremos la letra correspondiente al planeta dejando solo la identificación del sistema. 
+
+Por ejemplo:
+
+"K2-18 b" -> "K2-18" 
+
+"EPIC 201367065 b" -> "EPIC 201367065"
+
+**Esto se realiza con el objetivo de que más tarde, en la CV, los grupos sean por host_id y evitar data leak**
+
+```{r}
+derive_host <- function(pl) {
+  sub("\\s+[bcdefghijklmnopqrstuvwxyz].*$", "", pl, ignore.case = TRUE)
+}
+
+datasets_con_pca <- lapply(datasets_con_pca, function(df){
+  df$host_id <- if ("hostname" %in% names(df)) df$hostname else derive_host(df$pl_name)
+  df
+})
+```
+
+```{r}
+# Aseguro mismo orden de filas en cada imputación
+ref_names <- datasets_con_pca[[1]]$pl_name
+datasets_con_pca <- lapply(datasets_con_pca, function(df){
+  idx <- match(ref_names, df$pl_name)
+  stopifnot(!any(is.na(idx)))
+  df[idx, , drop = FALSE]
+})
+
+# convertimos a factor la variable de sistema. 
+all_hosts <- sort(unique(unlist(lapply(datasets_con_pca, function(df) trimws(as.character(df$host_id))))))
+
+datasets_con_pca <- lapply(datasets_con_pca, function(df){
+  h <- trimws(as.character(df$host_id))
+  h[is.na(h) | h == ""] <- df$pl_name[is.na(h) | h == ""]  # por si faltara alguno
+  df$host_id <- factor(h, levels = all_hosts)
+  df
+})
+
+library(caret)
+
+make_repeated_group_folds <- function(groups, k = 5, times = 5){
+  idx <- list(); c <- 0
+  for (t in seq_len(times)){
+    folds <- groupKFold(groups, k = k)  
+    for (j in seq_len(k)){
+      c <- c + 1
+      idx[[paste0("Fold", t, ".", j)]] <- folds[[j]]
+    }
+  }
+  idx
+}
+
+host_vec <- datasets_con_pca[[1]]$host_id  # ya es factor
+```
+
+```{r, eval=FALSE}
+#guardo los folds para no perder la reproducibilidad.
+index_grp <- make_repeated_group_folds(host_vec, k = 5, times = 5)
+saveRDS(index_grp, "index_grp.rds")
+```
+
+
+```{r}
+index_grp <- readRDS("index_grp.rds")
+ctrl_grp <- caret::trainControl(
+  method = "cv", number = 5,
+  index = index_grp,
+  classProbs = TRUE, summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  allowParallel = FALSE
+)
+```
+
+:::{.callout-note}
+Ahora se tiene una lista con los m=5 datasets completos y con los componentes principales 
+cada dataframe es de 589x8 **datasets_con_pca**
+
+Las variables de estudio son: "st_met", "sy_pm", "sy_dist", "dummy_disposition", 
+"PC1_mag", "PC2_mag", "PC1_st"
+
+Se ha creado también la variable host_id, esta variable es de tipo factor y agrupa los planetas por sistemas
+:::
+
+# Modelado
+
+## logística binaria
+
+```{r}
+library(magrittr)
+vars <- c("st_met","sy_pm","sy_dist","PC1_mag","PC2_mag","PC1_st")
+form <- reformulate(vars, "dummy_disposition")
+
+# hago un glm en cada dataset y luego fusiono
+modelos_logit <- purrr::map(datasets_con_pca, ~{
+  df <- .x
+  df$dummy_disposition <- factor(df$dummy_disposition, levels = c("1","0")) # 1 = exoplaneta
+  glm(form, data = df, family = binomial)
+})
+
+modelo_pool_logit <- pool(as.mira(modelos_logit))
+
+# Resumen + OR y sus IC
+sp <- summary(modelo_pool_logit, conf.int = TRUE)
+sp$OR      <- exp(sp$estimate)
+sp$OR_low  <- exp(sp$`2.5 %`)
+sp$OR_high <- exp(sp$`97.5 %`)
+sp
+
+sp <- as.data.frame(lapply(sp, as.numeric))
+
+write.table(round(sp,3), file = "clipboard", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+
+```{r}
+#Observamos si hay pocos planetes gigantes gaseosos
+
+load("data_modelos_mad.rdata")
+cut_size <- function(r_Re){
+  dplyr::case_when(
+    is.na(r_Re)         ~ NA_character_,
+    r_Re < 1.25         ~ "Tierras",
+    r_Re < 2.0          ~ "Super-Tierras",
+    r_Re < 4.0          ~ "Mini-Neptunos",
+    r_Re < 6.0          ~ "Neptunos",
+    TRUE                ~ "Gigantes gaseosos"
+  )
+}
+
+df <- data_modelos_mad
+df$size_class <- cut_size(df$pl_rade)
+
+library(dplyr)
+prop_por_tamano <- df %>%
+  count(size_class) %>%
+  group_by(size_class) %>%
+  mutate(prop = n/sum(n)) %>%
+  arrange(match(size_class, c("Tierras","Super-Tierras","Mini-Neptunos","Neptunos","Gigantes gaseosos")))
+
+prop_por_tamano
+
+# dim(data_modelos_mad)
+```
+
+Observamos que sí, hay poca presencia de gigantes gaseosos en la muestra. 
+
+### Cross Validation agrupada
+
+```{r}
+library(caret)
+library(pROC)
+library(dplyr)
+library(purrr)
+
+vars <- c("st_met","sy_pm","sy_dist","PC1_mag","PC2_mag","PC1_st")
+form <- reformulate(vars, "dummy_disposition")
+
+# Control de CV con índices ya creados
+ctrl_grp <- trainControl(
+  method = "cv",
+  index  = index_grp,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+# convertimos a pos = 1, neg = 0, porque da error.
+to_posneg <- function(df){
+  y <- as.character(df$dummy_disposition)
+  y <- ifelse(y == "1", "pos", "neg")              # 1 -> pos (evento)
+  df$dummy_disposition <- factor(y, levels = c("pos","neg"))
+  df
+}
+
+# hacemos glm por cada data set, guardamos las predicciones OOF y AUC de las OOF
+fit_one <- function(df, imp_id){
+  df2 <- to_posneg(df)
+  fit <- train(form, data=df2, method="glm", family=binomial,
+               trControl=ctrl_grp, metric="ROC")
+  # AUC OOF por imputación
+  auc_imp <- getTrainPerf(fit)$TrainROC
+
+
+  preds_imp <- fit$pred %>%
+    mutate(imp = imp_id,
+           p_pos = .data[["pos"]]) %>%              # prob. clase positiva
+    left_join(
+      df2 %>% mutate(rowIndex = row_number()) %>% select(rowIndex, pl_name),
+      by = "rowIndex"
+    ) %>%
+    select(pl_name, obs, p_pos, imp, Resample, rowIndex)
+
+  list(auc = as.numeric(auc_imp), preds = preds_imp)
+}
+```
+
+```{r, eval=FALSE}
+res_list <- map2(datasets_con_pca, seq_along(datasets_con_pca), fit_one)
+saveRDS(res_list, file = "resultados_glm.rds")
+```
+
+```{r}
+res_list <- readRDS("resultados_glm.rds") 
+# metricas
+
+aucs <- map_dbl(res_list, "auc") #aucI1, aucI2, .... aucI5
+mean_auc <- mean(aucs) #auc media 
+sd_auc   <- sd(aucs)
+
+preds <- bind_rows(map(res_list, "preds"))
+
+obs_ref <- datasets_con_pca[[1]] %>%
+  to_posneg() %>%
+  transmute(pl_name, obs = dummy_disposition)
+
+preds_avg <- preds %>%
+  group_by(pl_name) %>%
+  summarise(p_pos = mean(p_pos), n_preds = dplyr::n(), .groups="drop") %>%
+  left_join(obs_ref, by="pl_name") %>%
+  select(pl_name, obs, p_pos, n_preds)
+
+roc_cv <- pROC::roc(response = preds_avg$obs,
+                    predictor = preds_avg$p_pos,
+                    levels = c("neg","pos"),
+                    direction = "<")
+auc_cv <- as.numeric(pROC::auc(roc_cv))
+
+ss_05 <- pROC::coords(roc_cv, x = 0.5, input = "threshold",
+                      ret = c("threshold","sensitivity","specificity","accuracy"))
+
+ss_best <- pROC::coords(roc_cv, x = "best", best.method = "youden",
+                        ret = c("threshold","sensitivity","specificity","accuracy"))
+
+
+list(
+  aucs = aucs,
+  mean_auc = mean_auc,
+  sd_auc = sd_auc,
+  head_preds = head(preds),
+  head_preds_avg = head(preds_avg),
+  auc_cv = auc_cv,
+  ss_05 = ss_05,
+  ss_best = ss_best
+)
+
+```
+
+```{r}
+library(caret)
+library(dplyr)
+
+# Umbrales
+thr_05     <- 0.5
+thr_youden <- as.numeric(ss_best["threshold"])
+
+# matriz de confusión para un umbral dado
+conf_mat_at <- function(th){
+  pred <- factor(ifelse(preds_avg$p_pos >= th, "pos", "neg"),
+                 levels = c("neg","pos"))
+  ref  <- factor(preds_avg$obs, levels = c("neg","pos"))
+  caret::confusionMatrix(pred, ref, positive = "pos")
+}
+
+# Matrices de confusión en 0.5 y en Youden
+cm_05     <- conf_mat_at(thr_05)
+cm_youden <- conf_mat_at(thr_youden)
+
+cm_05
+cm_youden
+
+data.frame(
+  threshold   = c(thr_05, thr_youden),
+  Accuracy    = c(cm_05$overall["Accuracy"],    cm_youden$overall["Accuracy"]),
+  Sensitivity = c(cm_05$byClass["Sensitivity"], cm_youden$byClass["Sensitivity"]),
+  Specificity = c(cm_05$byClass["Specificity"], cm_youden$byClass["Specificity"]),
+  Precision   = c(cm_05$byClass["Precision"],   cm_youden$byClass["Precision"]),
+  F1          = c(cm_05$byClass["F1"],          cm_youden$byClass["F1"])
+)
+
+```
+
+
+```{r}
+library(caret); library(pROC)
+
+ctrl_grp <- trainControl(
+  method = "cv",
+  index = index_grp,     # folds agrupados por host_id
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+to_posneg <- function(df){
+  y <- as.character(df$dummy_disposition)
+  y <- ifelse(y == "1", "pos", "neg")# 1 -> pos (evento)
+  df$dummy_disposition <- factor(y, levels = c("pos","neg"))
+  df
+}
+
+auc_vec <- map_dbl(datasets_con_pca, function(df){
+  df <- to_posneg(df)
+  fit <- train(form, data=df, method="glm", family=binomial,
+               trControl=ctrl_grp, metric="ROC")
+  preds <- fit$pred
+  roc_obj <- pROC::roc(response = preds$obs,
+                       predictor = preds[["pos"]],  
+                       levels = c("neg","pos"),
+                       direction = "<")
+  as.numeric(pROC::auc(roc_obj))
+})
+
+mean_auc <- mean(auc_vec)
+sd_auc <- sd(auc_vec)
+cat(sprintf("AUC CV (media ± sd sobre imputaciones): %.3f ± %.3f\n", mean_auc, sd_auc))
+
+```
+
+Dibujamos las curvas...
+
+```{r}
+library(pROC)
+library(dplyr)
+# Opcional para paleta:
+suppressWarnings(library(RColorBrewer))
+
+# 1) ROC por imputación (usamos las OOF de cada imputación)
+#    Nos aseguramos de que 'obs' tiene niveles c("neg","pos") y 'p_pos' es la prob de 'pos'
+preds <- preds %>%
+  mutate(obs = factor(obs, levels = c("neg","pos")))
+
+roc_list <- preds %>%
+  group_by(imp) %>%
+  group_split() %>%
+  lapply(function(d) roc(response = d$obs,
+                         predictor = d$p_pos,
+                         levels = c("neg","pos"),
+                         direction = "<"))
+
+aucs_imp <- sapply(roc_list, auc)
+
+
+# 3) Plot: 5 ROC finas + 1 ROC final en negrita
+nc <- max(5, length(roc_list))
+cols <- if (requireNamespace("RColorBrewer", quietly = TRUE)) {
+  brewer.pal(n = min(8, nc), name = "Set1")
+} else {
+  rep("grey40", nc)
+}
+
+
+
+png("roc_IM_logistica.png", width=1800, height=1200, res=220)
+
+plot(roc_list[[1]], lwd = 1.5, col = cols[1],
+     legacy.axes = TRUE, main = "ROC por imputación (5) + ROC final agregada")
+for (i in 2:length(roc_list)) {
+  lines(roc_list[[i]], lwd = 1.5, col = cols[i])
+}
+
+# Línea gruesa para la curva agregada
+lines(roc_cv, lwd = 3.2, col = "black")
+
+legend("bottomright",
+       legend = c(paste0("Imp ", seq_along(roc_list), "  AUC=", sprintf("%.3f", aucs_imp)),
+                  paste0("Agregada  AUC=", sprintf("%.3f", auc_cv))),
+       col = c(cols[seq_along(roc_list)], "black"),
+       lwd = c(rep(1.5, length(roc_list)), 3.2),
+       cex = 0.85, bty = "n")
+
+dev.off()
+```
+
+##  Árbol de clasificación
+
+### gini vs entropia
+
+```{r, eval=FALSE}
+# --- COMPARATIVA GINI vs ENTROPÍA (para ejecutar antes del pipeline final) ---
+vars <- c("st_teff", "st_rad", "st_mass", "st_met", "st_logg", 
+"sy_pm", "sy_dist", "sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", 
+"sy_kmag", "sy_umag", "sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", 
+"sy_w1mag", "sy_w2mag", "sy_w3mag", "sy_w4mag", "sy_gaiamag", 
+"sy_tmag", "sy_kepmag")
+
+library(caret); library(pROC); library(dplyr); library(purrr); library(tibble)
+library(rpart)
+
+
+fiveStats <- function(data, lev = levels(data$obs), model = NULL){
+  c(twoClassSummary(data, lev = lev, model = model),
+    defaultSummary(data, lev = lev))
+}
+grid <- expand.grid(cp = seq(0.001, 0.02, by = 0.001))
+
+ref_names <- datasets_completos[[1]]$pl_name
+datasets_compar <- lapply(datasets_completos, function(df){
+  idx <- match(ref_names, df$pl_name); stopifnot(!any(is.na(idx))); df[idx, , drop = FALSE]
+})
+stopifnot(all(sapply(datasets_compar, \(df) identical(df$pl_name, ref_names))))
+
+# CV estratificada común a todas las imputaciones
+df0 <- to_posneg(datasets_compar[[1]])
+index_grp <- createFolds(df0$dummy_disposition, k = 5, returnTrain = TRUE)
+
+# mismo grid que ya definiste arriba
+n_res <- length(index_grp)         # 5
+n_mod <- nrow(grid)                # 20
+
+set.seed(271828)
+seeds_list <- vector("list", n_res + 1)
+for(i in seq_len(n_res)) seeds_list[[i]] <- sample.int(1e6, n_mod)
+seeds_list[[n_res + 1]] <- sample.int(1e6, 1)
+
+ctrl_grp <- trainControl(
+  method = "cv",
+  index  = index_grp,
+  classProbs = TRUE,
+  summaryFunction = fiveStats,
+  savePredictions = "final",
+  allowParallel = FALSE,           # para total determinismo
+  seeds = seeds_list
+)
+
+# 3) Entrena árbol según el splitrule indicado
+fit_one <- function(df, imp_id, split = c("gini","information")){
+  split <- match.arg(split)
+  df2 <- to_posneg(df)
+  fit <- train(
+    reformulate(vars, "dummy_disposition"), data=df2, method="rpart",
+    metric="ROC", trControl=ctrl_grp, tuneGrid=grid,
+    parms=list(split=split), control=rpart.control(minbucket=20)
+  )
+  tp <- getTrainPerf(fit)
+  preds_imp <- fit$pred %>%
+    mutate(imp=imp_id, p_pos=.data[["pos"]]) %>%
+    left_join(df2 %>% mutate(rowIndex=row_number()) %>% select(rowIndex, pl_name),
+              by="rowIndex") %>%
+    select(pl_name, obs, p_pos, imp, Resample)
+  list(
+    fit=fit,
+    auc=as.numeric(tp$TrainROC),
+    sens=as.numeric(tp$TrainSens),
+    spec=as.numeric(tp$TrainSpec),
+    acc=as.numeric(tp$TrainAccuracy),
+    kappa=as.numeric(tp$TrainKappa),
+    preds=preds_imp
+  )
+}
+
+# entreno de árboles
+splits <- c("gini","information")
+set.seed(123)
+res_by_split <- lapply(splits, function(sp){
+  map2(datasets_compar, seq_along(datasets_compar), ~ fit_one(.x, imp_id=.y, split=sp))
+})
+names(res_by_split) <- splits
+
+
+cv_summary <- bind_rows(lapply(names(res_by_split), function(sp){
+  tibble(
+    split = sp,
+    AUC   = map_dbl(res_by_split[[sp]], "auc"),
+    Sens  = map_dbl(res_by_split[[sp]], "sens"),
+    Spec  = map_dbl(res_by_split[[sp]], "spec"),
+    Acc   = map_dbl(res_by_split[[sp]], "acc"),
+    Kappa = map_dbl(res_by_split[[sp]], "kappa")
+  ) %>% 
+  summarise(split=first(split),
+            AUC_mean=mean(AUC),   AUC_sd=sd(AUC),
+            Acc_mean=mean(Acc),   Acc_sd=sd(Acc),
+            Kappa_mean=mean(Kappa), Kappa_sd=sd(Kappa),
+            Sens_mean=mean(Sens), Spec_mean=mean(Spec))
+}))
+cv_summary
+
+
+obs_ref <- to_posneg(datasets_compar[[1]]) %>% transmute(pl_name, obs=dummy_disposition)
+
+ens_auc <- lapply(names(res_by_split), function(sp){
+  preds <- bind_rows(map(res_by_split[[sp]], "preds"))
+  preds_avg <- preds %>%
+    group_by(pl_name) %>% summarise(p_pos=mean(p_pos), .groups="drop") %>%
+    left_join(obs_ref, by="pl_name")
+  roc_obj <- pROC::roc(response=preds_avg$obs, predictor=preds_avg$p_pos,
+                       levels=c("neg","pos"), direction="<")
+  list(roc=roc_obj, auc=as.numeric(pROC::auc(roc_obj)), preds_avg=preds_avg)
+})
+names(ens_auc) <- names(res_by_split)
+
+tibble(
+  split = names(ens_auc),
+  AUC_ensamble = sapply(ens_auc, \(x) x$auc)
+)
+
+# 7) DeLong pareado entre Gini vs Entropía
+roc_gini  <- ens_auc$gini$roc
+roc_info  <- ens_auc$information$roc
+delong <- pROC::roc.test(roc_gini, roc_info, method="delong", paired=TRUE)
+delong
+
+```
+
+
+```{r}
+library(caret); library(pROC); library(dplyr); library(purrr)
+library(rpart); library(rpart.plot); library(tibble)
+library(partykit); library(grid)
+
+vars <- c("st_teff","st_rad","st_mass","st_met","st_logg","sy_pm","sy_dist",
+          "sy_bmag","sy_vmag","sy_jmag","sy_hmag","sy_kmag","sy_umag",
+          "sy_gmag","sy_rmag","sy_imag","sy_zmag","sy_w1mag","sy_w2mag"
+          ,"sy_w3mag","sy_w4mag",
+          "sy_gaiamag","sy_tmag","sy_kepmag")
+form <- reformulate(vars, "dummy_disposition")
+
+
+fiveStats <- function(data, lev = levels(data$obs), model = NULL){
+  c(twoClassSummary(data, lev = lev, model = model),
+    defaultSummary(data, lev = lev))
+}
+
+grid <- expand.grid(cp = seq(0.001, 0.02, by = 0.001))
+
+df0 <- to_posneg(datasets_completos[[1]])
+if (!exists("index_grp") || max(unlist(index_grp)) > nrow(df0)) {
+  set.seed(123)
+  index_grp <- createFolds(df0$dummy_disposition, k = 5, returnTrain = TRUE)
+}
+
+
+ctrl_grp <- trainControl(
+  method = "cv", index = index_grp,
+  classProbs = TRUE, summaryFunction = fiveStats,
+  savePredictions = "final"
+)
+
+# entreno para cada data set
+fit_one <- function(df, imp_id, split = "information"){
+  df2 <- to_posneg(df)
+  miss <- setdiff(vars, names(df2))
+  if(length(miss)) stop("Faltan variables en df: ", paste(miss, collapse=", "))
+
+  fit <- train(
+    form, data = df2, method = "rpart",
+    metric = "ROC", trControl = ctrl_grp, tuneGrid = grid,
+    parms = list(split = split),
+    control = rpart.control(minbucket = 20)
+  )
+
+  tp <- getTrainPerf(fit)
+  preds_imp <- fit$pred %>%
+    mutate(imp = imp_id, p_pos = .data[["pos"]]) %>%
+    left_join(df2 %>% mutate(rowIndex = row_number()) %>% select(rowIndex, pl_name),
+              by = "rowIndex") %>%
+    select(pl_name, obs, p_pos, imp, Resample)
+
+  vi <- varImp(fit)$importance %>% rownames_to_column("variable") %>% mutate(imp = imp_id)
+  root_var <- fit$finalModel$frame$var[1]
+
+  list(
+    fit   = fit,
+    auc   = as.numeric(tp$TrainROC),
+    sens  = as.numeric(tp$TrainSens),
+    spec  = as.numeric(tp$TrainSpec),
+    acc   = as.numeric(tp$TrainAccuracy),
+    kappa = as.numeric(tp$TrainKappa),
+    preds = preds_imp,
+    vi    = vi,
+    root  = root_var
+  )
+}
+```
+
+```{r, eval=FALSE}
+#guardo los modelos
+set.seed(123)
+res <- map2(datasets_completos, seq_along(datasets_completos), fit_one)
+saveRDS(res, sprintf("arboles_enDatasets%s.rds", format(Sys.time(), "%Y%m%d_%H%M%S")))
+#uso el tiempo para no reescribir otro modelo creado sin querer
+cat(sprintf("arboles_enDatasets%s.rds", format(Sys.time(), "%Y%m%d_%H%M%S")))
+```
+
+## Cross Validation 
+
+```{r}
+res <- readRDS("arboles_enDatasets20250907_130953.rds")
+
+cv_tab <- tibble(
+  AUC   = map_dbl(res, "auc"),
+  Sens  = map_dbl(res, "sens"),
+  Spec  = map_dbl(res, "spec"),
+  Acc   = map_dbl(res, "acc"),
+  Kappa = map_dbl(res, "kappa")
+)
+cv_resumen <- cv_tab |> summarise(across(everything(), list(mean = mean, sd = sd)))
+
+preds <- dplyr::bind_rows(purrr::map(res, "preds")) %>%
+  dplyr::mutate(obs = factor(as.character(obs), levels = c("neg","pos")))
+
+obs_ref <- preds %>%
+  dplyr::distinct(pl_name, obs)
+
+#obs_ref <- to_posneg(datasets_completos[[1]]) %>% transmute(pl_name, obs = dummy_disposition)
+
+preds_avg <- preds %>% group_by(pl_name) %>% summarise(p_pos = mean(p_pos), .groups="drop") %>%
+  left_join(obs_ref, by="pl_name")
+
+roc_cv <- pROC::roc(preds_avg$obs, preds_avg$p_pos, levels=c("neg","pos"), direction = "<")
+
+auc_cv <- as.numeric(pROC::auc(roc_cv))
+
+# Métricas a 0.5 y a Youden
+pred_05   <- factor(ifelse(preds_avg$p_pos >= 0.5, "pos","neg"), levels=c("neg","pos"))
+thr_best  <- as.numeric(pROC::coords(roc_cv, x="best", best.method="youden", ret="threshold"))
+pred_best <- factor(ifelse(preds_avg$p_pos >= thr_best, "pos","neg"), levels=c("neg","pos"))
+
+cm_05   <- confusionMatrix(pred_05,   preds_avg$obs, positive="pos", mode="prec_recall")
+cm_best <- confusionMatrix(pred_best, preds_avg$obs, positive="pos", mode="prec_recall")
+
+extrae_metricas <- function(cm, umbral){
+  c(
+    Umbral              = umbral,
+    Sensibilidad        = unname(cm$byClass["Sensitivity"]),
+    Especificidad       = unname(cm$byClass["Specificity"]),
+    `Balanced Accuracy` = unname(cm$byClass["Balanced Accuracy"]),
+    PPV                 = unname(cm$byClass["Pos Pred Value"]),
+    NPV                 = unname(cm$byClass["Neg Pred Value"]),
+    F1                  = unname(cm$byClass["F1"]),
+    Accuracy            = unname(cm$overall["Accuracy"]),
+    Kappa               = unname(cm$overall["Kappa"])
+  )
+}
+
+tabla_final <- rbind(
+  c(AUC = auc_cv, extrae_metricas(cm_05, 0.5)),
+  c(AUC = auc_cv, extrae_metricas(cm_best, thr_best))
+) |> as.data.frame() |> mutate(across(-Umbral, \(x) as.numeric(x)))
+
+vip <- bind_rows(map(res, "vi")) %>% group_by(variable) %>%
+  summarise(imp_mean = mean(Overall), imp_sd = sd(Overall), .groups="drop") %>%
+  arrange(desc(imp_mean))
+
+aucs <- map_dbl(res, "auc")
+i_rep <- which.max(aucs)
+fit_rep <- res[[i_rep]]$fit
+arbol_rep <- fit_rep$finalModel
+
+png("arbol_representativoBARRRAS.png", width=1800, height=1200, res=220)
+plot(as.party(arbol_rep), gp = grid::gpar(fontsize = 8),
+     terminal_panel = node_barplot) 
+dev.off()
+
+rpart.plot(arbol_rep, type=2, extra=106, under=F, fallen.leaves=T,
+           faclen=0, varlen=0, digits=3)
+
+png("arbol_representativo.png", width=1800, height=1200, res=220)
+rpart.plot(arbol_rep, type=2, extra=104, under=F, fallen.leaves=TRUE,
+           faclen=0, varlen=0, digits=3)
+dev.off()
+
+```
+
+```{r}
+cm_tab <- function(cm){
+  as.data.frame(cm$table) |>
+    tidyr::pivot_wider(names_from = Reference, values_from = Freq)
+}
+cm_tab(cm_05)
+cat("")
+cm_tab(cm_best)
+```
+
+evolución de AUC según cp...
+
+```{r}
+library(dplyr); library(purrr); library(ggplot2)
+
+tune_info <- bind_rows(lapply(seq_along(res), function(i){
+  fr <- res[[i]]$fit$results       # trae columnas: cp, ROC, Sens, Spec...
+  fr %>% transmute(imp = i, cp, AUC = ROC, Sens = Sens, Spec = Spec)
+}))
+
+tune_sum <- tune_info %>%
+  group_by(cp) %>%
+  summarise(AUC_mean = mean(AUC), AUC_sd = sd(AUC), .groups = "drop")
+
+best_cp <- data.frame(cp_star = sapply(res, function(x) x$fit$bestTune$cp))
+
+png("evolucion_cp", width = 2700, height = 1500, res = 300)
+ggplot() +
+  geom_line(data = tune_info, aes(cp, AUC, group = imp, color = factor(imp)), alpha = 0.35) +
+  geom_point(data = tune_info, aes(cp, AUC), alpha = 0.35, size = 1.2) +
+  
+  geom_line(data = tune_sum, aes(cp, AUC_mean), size = 1.2) +
+  geom_rug(data = best_cp, aes(x = cp_star), sides = "b", alpha = 0.6) +
+  scale_x_continuous(breaks = unique(tune_sum$cp)) +
+  labs(x = "cp (rpart complexity parameter)",
+       y = "AUC (ROC) en CV",
+       title = "Evolución de AUC según cp (split = information)",
+       subtitle = "Líneas finas: imputaciones | Línea gruesa: media") +
+  theme_minimal(base_size = 12)
+dev.off()
+```
+
+# Random Forest
+
+```{r}
+library(caret)
+library(ranger)
+library(pROC)
+library(dplyr)
+library(purrr)
+
+datasets_completos <- complete(imp_mult_mad3, "all")
+
+ref_names <- datasets_con_pca[[1]]$pl_name
+
+datasets_rf <- lapply(datasets_completos, function(df){
+  idx <- match(ref_names, df$pl_name)
+  stopifnot(!any(is.na(idx))) #seguridad
+  df[idx, , drop = FALSE]
+})
+
+# Añado host_id
+map_hosts <- datasets_con_pca[[1]] %>% select(pl_name, host_id)
+datasets_rf <- lapply(datasets_rf, function(df){
+  df %>% left_join(map_hosts, by = "pl_name")
+})
+
+# Clase positiva como "pos" por seguridad, niveles en orden (pos primero)
+to_posneg <- function(df){
+  y <- ifelse(as.character(df$dummy_disposition)=="Exoplaneta","pos","neg")
+  df$dummy_disposition <- factor(y, levels=c("pos","neg"))
+  df
+}
+
+# Control de CV por clase, es decir, por sistema planetario
+ctrl_grp <- trainControl(
+  method = "cv",
+  index  = index_grp,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"       
+)
+```
+
+```{r, eval=FALSE}
+#EN ESTE CHUNK SE CREA EL MODELO
+# Entrenamiento en UNA imputación (con pesos de clase automáticos)
+
+fit_rf_one <- function(df, imp_id){
+  # Etiquetas
+  df2 <- to_posneg(df)
+
+
+  # Predictores
+  vars <- setdiff(names(df2), c("dummy_disposition","pl_name","host_id"))
+  p <- length(vars)
+  form_rf <- reformulate(vars, "dummy_disposition")
+
+  # Pesos de clase por desbalanceo: w_neg = n_pos / n_neg ; w_pos = 1
+
+  n_pos <- sum(df2$dummy_disposition == "pos")
+  n_neg <- sum(df2$dummy_disposition == "neg")
+
+  w_pos <- 1
+  w_neg <- ifelse(n_neg > 0, n_pos / n_neg, 1)  # más peso a 'neg'
+
+  class_w <- c("pos" = w_pos, "neg" = w_neg)
+
+  # Grid de hiperparámetros:
+  # - mtry alrededor de sqrt(p): mitad, 1x, 2x
+  # - splitrule: gini vs extratrees
+  # - min.node.size: hojas mínimas (más alto = menos sobreajuste)
+  grid <- expand.grid(
+    mtry = unique(pmax(1, round(c(sqrt(p)/2, sqrt(p), sqrt(p)*2)))),
+    splitrule = c("gini","extratrees"),
+    min.node.size = c(1, 5, 10, 20, 30)
+  )
+
+  set.seed(123)
+  fit <- train(
+    form = form_rf,
+    data = df2,
+    method = "ranger",
+    metric = "ROC",                
+    trControl = ctrl_grp,
+    tuneGrid = grid,
+    importance = "permutation",    # importancia por permutación
+    num.trees = 1000,              
+    class.weights = class_w,       # corrige desbalanceo
+    num.threads = max(1, parallel::detectCores()-1)
+  )
+
+  # AUC OOF de la mejor combinación
+  auc_imp <- getTrainPerf(fit)$TrainROC
+
+  # Predicciones OOF del mejor modelo
+  preds_imp <- fit$pred %>%
+    mutate(imp = imp_id, p_pos = .data[["pos"]]) %>%
+    left_join(df2 %>% mutate(rowIndex = row_number()) %>% select(rowIndex, pl_name),
+              by = "rowIndex") %>%
+    select(pl_name, obs, p_pos, imp, Resample)
+
+  # Importancia de variables del mejor modelo (una imputación)
+  vi <- varImp(fit)$importance %>%
+    tibble::rownames_to_column("variable") %>%
+    mutate(imp = imp_id)
+
+  # Devolvemos todo lo que luego agregamos
+  list(fit = fit, auc = as.numeric(auc_imp), preds = preds_imp, vi = vi)
+}
+
+# Ejecutar en las m imputaciones
+
+res_rf <- map2(datasets_rf, seq_along(datasets_rf), fit_rf_one)
+saveRDS(res_rf,"randomForest_final")
+```
+
+
+```{r}
+res_rf <- readRDS("randomForest_final")
+
+# AUC por imputación (OOF del mejor modelo en cada una)
+aucs_rf <- map_dbl(res_rf, "auc")
+mean_auc_rf <- mean(aucs_rf)
+sd_auc_rf   <- sd(aucs_rf)
+
+# Predicciones OOF agregadas por planeta (promedio sobre imputaciones y repeticiones)
+preds_rf <- bind_rows(map(res_rf, "preds"))
+obs_ref  <- to_posneg(datasets_rf[[1]]) %>% transmute(pl_name, obs = dummy_disposition)
+
+preds_rf_avg <- preds_rf %>%
+  group_by(pl_name) %>%
+  summarise(p_pos = mean(p_pos), .groups = "drop") %>%
+  left_join(obs_ref, by = "pl_name")
+
+# ROC/AUC agregada
+roc_rf <- pROC::roc(response = preds_rf_avg$obs, predictor = preds_rf_avg$p_pos,
+                    levels = c("neg","pos"), direction = "<")
+auc_rf <- as.numeric(pROC::auc(roc_rf))
+
+# Sens/Spec a 0.5 y óptimo de Youden
+pred05   <- factor(ifelse(preds_rf_avg$p_pos >= 0.5, "pos", "neg"), levels = c("neg","pos"))
+cm05     <- caret::confusionMatrix(pred05, preds_rf_avg$obs, positive = "pos")
+
+thr_best <- as.numeric(pROC::coords(roc_rf, "best", best.method = "youden", ret = "threshold"))
+predB    <- factor(ifelse(preds_rf_avg$p_pos >= thr_best, "pos", "neg"), levels = c("neg","pos"))
+cmB      <- caret::confusionMatrix(predB, preds_rf_avg$obs, positive = "pos")
+
+list(
+  aucs_por_imputacion = aucs_rf,
+  auc_cv_media = mean_auc_rf, auc_cv_sd = sd_auc_rf,
+  auc_agregada = auc_rf,
+  corte_0_5 = cm05$byClass[c("Sensitivity","Specificity")],
+  corte_Youden = c(umbral = thr_best, cmB$byClass[c("Sensitivity","Specificity")])
+)
+
+```
+
+A continución calculo la importancia de las variables
+
+```{r}
+# Normaliza importancias dentro de cada imputación (suman 1) y promedia
+vi_all_norm <- bind_rows(lapply(res_rf, function(r){
+  vi <- r$vi
+  vi$Overall <- vi$Overall / sum(vi$Overall)
+  vi
+}))
+
+vip_rf <- vi_all_norm %>%
+  group_by(variable) %>%
+  summarise(imp_mean = mean(Overall), imp_sd = sd(Overall), .groups = "drop") %>%
+  arrange(desc(imp_mean))
+
+# Barplot con barras de error
+bp <- barplot(vip_rf$imp_mean, names.arg = vip_rf$variable, las = 2,
+              ylab = "Importancia (media normalizada MI)",
+              ylim = c(0, max(vip_rf$imp_mean + vip_rf$imp_sd, na.rm = TRUE) * 1.05))
+
+arrows(x0 = bp, y0 = vip_rf$imp_mean - vip_rf$imp_sd,
+       x1 = bp, y1 = vip_rf$imp_mean + vip_rf$imp_sd,
+       angle = 90, code = 3, length = 0.05)
+```
+
+
+grafico las curvas
+
+```{r}
+preds <- preds %>%
+  mutate(obs = factor(obs, levels = c("neg","pos")))
+
+roc_list <- preds %>%
+  group_by(imp) %>%
+  group_split() %>%
+  lapply(function(d) roc(response = d$obs,
+                         predictor = d$p_pos,
+                         levels = c("neg","pos"),
+                         direction = "<"))
+
+aucs_imp <- sapply(roc_list, auc)
+
+
+# ROCs para cada imputación más la final
+nc <- max(5, length(roc_list))
+cols <- if (requireNamespace("RColorBrewer", quietly = TRUE)) {
+  brewer.pal(n = min(8, nc), name = "Set1")
+} else {
+  rep("grey40", nc)
+}
+
+png("roc_IM_logistica.png", width=1800, height=1200, res=220)
+
+plot(roc_list[[1]], lwd = 1.5, col = cols[1],
+     legacy.axes = TRUE, main = "ROC por imputación (5) + ROC final agregada")
+for (i in 2:length(roc_list)) {
+  lines(roc_list[[i]], lwd = 1.5, col = cols[i])
+}
+
+# Línea gruesa para la curva agregada
+lines(roc_cv, lwd = 3.2, col = "black")
+
+legend("bottomright",
+       legend = c(paste0("Imp ", seq_along(roc_list), "  AUC=", sprintf("%.3f", aucs_imp)),
+                  paste0("Agregada  AUC=", sprintf("%.3f", auc_cv))),
+       col = c(cols[seq_along(roc_list)], "black"),
+       lwd = c(rep(1.5, length(roc_list)), 3.2),
+       cex = 0.85, bty = "n")
+
+dev.off()
+```
+
+Evolución de hiperparámetros y AUC
+```{r}
+library(dplyr); library(purrr); library(tidyr); library(ggplot2)
+
+# Recoge la tabla de tuning de CADA imputación
+# (cada fit trae $results con columnas: mtry, splitrule, min.node.size, ROC, Sens, Spec, Accuracy, Kappa)
+tune_all <- bind_rows(imap(res_rf, ~ .x$fit$results %>% mutate(imp = .y)))
+
+# Resumen (media y sd) por combinación de hiperparámetros
+tune_sum <- tune_all %>%
+  group_by(splitrule, min.node.size, mtry) %>%
+  summarise(ROC_mean = mean(ROC), ROC_sd = sd(ROC), .groups = "drop")
+
+# puntos "bestTune" por imputación con su ROC real
+best_points_imp <- bind_rows(imap(res_rf, ~ .x$fit$bestTune %>% mutate(imp = .y))) %>%
+  left_join(
+    tune_all %>% select(splitrule, min.node.size, mtry, imp, ROC),
+    by = c("splitrule","min.node.size","mtry","imp")
+  )
+png("hiperparametros_RF.png", width = 2500, height = 1500, res = 300)
+ggplot() +
+  geom_line(data = tune_all,
+            aes(x = mtry, y = ROC,
+                group = interaction(imp, splitrule, min.node.size),
+                color = factor(imp)),
+            linewidth = 0.6, alpha = 0.85) +
+  geom_line(data = tune_sum,
+            aes(x = mtry, y = ROC_mean),
+            color = "black", linewidth = 1.2, linetype = "solid",
+            show.legend = FALSE) +
+  facet_grid(splitrule ~ min.node.size, labeller = label_both) +
+  scale_x_continuous(breaks = sort(unique(tune_all$mtry))) +
+  scale_color_brewer(palette = "Set1", name = "Imputación") +
+  labs(x = "mtry", y = "AUC (ROC) CV",
+       title = "Random Forest: AUC vs hiperparámetros",
+       subtitle = "Cada color = una imputación; línea discontinua = media") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+dev.off()
+```
+
+# Extreme Gradient Boosting
+
+```{r}
+library(caret)
+library(xgboost)
+library(pROC)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+datasets_completos <- complete(imp_mult_mad3, "all")
+
+# Aseguro MISMO orden de pl_name que en los datasets con PCA
+ref_names <- datasets_con_pca[[1]]$pl_name
+datasets_xgb <- lapply(datasets_completos, function(df){
+  idx <- match(ref_names, df$pl_name)
+  stopifnot(!any(is.na(idx)))
+  df[idx, , drop = FALSE]
+})
+
+# Le añado host_id desde el objeto con PCA 
+map_hosts <- datasets_con_pca[[1]] %>% select(pl_name, host_id)
+datasets_xgb <- lapply(datasets_xgb, \(df) left_join(df, map_hosts, by = "pl_name"))
+
+to_posneg <- function(df){
+  y <- ifelse(as.character(df$dummy_disposition)=="Exoplaneta","pos","neg")
+  df$dummy_disposition <- factor(y, levels=c("pos","neg"))
+  df
+}
+
+# Control de CV agrupada por sistema (mismos folds que RF)
+ctrl_grp <- trainControl(
+  method = "cv",
+  index  = index_grp,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+```
+
+
+
+```{r}
+# Usa solo los 5 folds de la 1ª repetición 
+index_grp_small <- index_grp[grepl("^Fold1\\.", names(index_grp))]
+if (length(index_grp_small) == 0) {
+  # Por si tus nombres no siguen ese patrón: toma los 5 primeros
+  index_grp_small <- index_grp[seq_len(5)]
+}
+
+library(doParallel)
+cl <- makePSOCKcluster(parallel::detectCores()-1)
+# Carga paquetes en cada worker
+parallel::clusterEvalQ(cl, {
+  library(caret); library(pROC); library(xgboost); library(dplyr)
+})
+# Exporta objetos/funciones que usan los workers
+parallel::clusterExport(cl, c("index_grp_small", "to_posneg"), envir=environment())
+
+# Semilla reproducible para el cluster (opcional)
+parallel::clusterSetRNGStream(cl, 123)
+registerDoParallel(cl)
+
+
+ctrl_small <- trainControl(
+  method="cv", index=index_grp_small,
+  classProbs=TRUE, summaryFunction=twoClassSummary,
+  savePredictions="final", allowParallel=TRUE
+)
+
+grid_small <- expand.grid(
+  nrounds = c(200, 400),
+  max_depth = c(3, 4),
+  eta = c(0.1),
+  gamma = c(0),
+  colsample_bytree = c(0.8),
+  min_child_weight = c(1, 3),
+  subsample = c(0.8)
+)
+
+# Entrenador rápido SOLO en 1 imputación
+fit_xgb_one_fast <- function(df, imp_id, ctrl=ctrl_small, grid=grid_small){
+  df2 <- to_posneg(df)
+  vars <- setdiff(names(df2), c("dummy_disposition","pl_name","host_id"))
+  form_xgb <- reformulate(vars, "dummy_disposition")
+  set.seed(123)
+  fit <- caret::train(form=form_xgb, data=df2, method="xgbTree",
+                      metric="ROC", trControl=ctrl, tuneGrid=grid, nthread = 1)
+  auc_imp <- getTrainPerf(fit)$TrainROC
+  preds_imp <- fit$pred |>
+    dplyr::mutate(imp=imp_id, p_pos=.data[["pos"]]) |>
+    dplyr::left_join(df2 |>
+                       dplyr::mutate(rowIndex=dplyr::row_number()) |>
+                       dplyr::select(rowIndex, pl_name),
+                     by="rowIndex") |>
+    dplyr::select(pl_name, obs, p_pos, imp, Resample)
+  vi <- varImp(fit)$importance |>
+    tibble::rownames_to_column("variable") |>
+    dplyr::mutate(imp=imp_id)
+  list(fit=fit, auc=as.numeric(auc_imp), preds=preds_imp, vi=vi)
+}
+
+# hacemos entrenamiento rapido en la 1ª imputación para localizar buena zona
+coarse <- fit_xgb_one_fast(datasets_xgb[[1]], 1)
+bt <- coarse$fit$bestTune  # hiperparámetros "buenos" de partida
+bt
+
+```
+
+:::{.callout-important}
+Hiperparámetros nrounds 400, maxdepth 4, eta 0,1, gamma 0, colsample_bytree 0.8, min_child_weight 3, subsample 0.8
+:::
+
+
+```{r}
+ctrl_full <- trainControl(
+  method = "cv",
+  index  = index_grp,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  allowParallel = TRUE
+)
+
+# Grid fino
+grid_fine <- expand.grid(
+  nrounds = unique(pmax(100, round(bt$nrounds * c(0.75, 1, 1.25)))),
+  max_depth = unique(pmax(2, bt$max_depth + c(-1, 0, +1))),
+  eta = bt$eta,                        
+  gamma = unique(sort(unique(c(bt$gamma, 0, 1)))),
+  colsample_bytree = bt$colsample_bytree,
+  min_child_weight = unique(sort(unique(c(bt$min_child_weight, 1, 2, 3)))),
+  subsample = bt$subsample
+)
+
+fit_xgb_one_fine <- function(df, imp_id){
+  df2 <- to_posneg(df)
+  vars <- setdiff(names(df2), c("dummy_disposition","pl_name","host_id"))
+  form_xgb <- reformulate(vars, "dummy_disposition")
+  set.seed(123)
+  fit <- caret::train(form=form_xgb, data=df2, method="xgbTree",
+                      metric="ROC", trControl=ctrl_full, tuneGrid=grid_fine, nthread = 1)
+  auc_imp <- getTrainPerf(fit)$TrainROC
+  preds_imp <- fit$pred |>
+    dplyr::mutate(imp=imp_id, p_pos=.data[["pos"]]) |>
+    dplyr::left_join(df2 |>
+                       dplyr::mutate(rowIndex=dplyr::row_number()) |>
+                       dplyr::select(rowIndex, pl_name),
+                     by="rowIndex") |>
+    dplyr::select(pl_name, obs, p_pos, imp, Resample)
+  vi <- varImp(fit)$importance |>
+    tibble::rownames_to_column("variable") |>
+    dplyr::mutate(imp=imp_id)
+  list(fit=fit, auc=as.numeric(auc_imp), preds=preds_imp, vi=vi)
+}
+
+muffle_ntree_warn <- function(expr){
+  withCallingHandlers(expr, warning = function(w){
+    if (grepl("`ntree_limit` is deprecated", conditionMessage(w)))
+      invokeRestart("muffleWarning")
+  })
+}
+
+```
+
+```{r, eval=FALSE}
+res_xgb <- purrr::map2(
+  datasets_xgb, 
+  seq_along(datasets_xgb),
+  ~ muffle_ntree_warn(fit_xgb_one_fine(.x, .y))
+)
+saveRDS(res_xgb, "XGboost_final")
+
+
+```
+
+```{r}
+# Métricas agregadas OOF (misma filosofía que RF)
+res_xgb <- readRDS("XGboost_final")
+
+aucs_xgb <- map_dbl(res_xgb, "auc")
+mean_auc_xgb <- mean(aucs_xgb)
+sd_auc_xgb   <- sd(aucs_xgb)
+
+# Predicciones OOF agregadas por planeta (promedio sobre imputaciones)
+preds_xgb <- bind_rows(map(res_xgb, "preds"))
+obs_ref   <- to_posneg(datasets_xgb[[1]]) %>% transmute(pl_name, obs = dummy_disposition)
+
+preds_xgb_avg <- preds_xgb %>%
+  group_by(pl_name) %>%
+  summarise(p_pos = mean(p_pos), .groups = "drop") %>%
+  left_join(obs_ref, by = "pl_name")
+
+# ROC/AUC agregada
+roc_xgb <- pROC::roc(response = preds_xgb_avg$obs,
+                     predictor = preds_xgb_avg$p_pos,
+                     levels = c("neg","pos"), direction = "<")
+auc_xgb <- as.numeric(pROC::auc(roc_xgb))
+
+# Sens/Spec a 0.5 y óptimo de Youden
+pred05   <- factor(ifelse(preds_xgb_avg$p_pos >= 0.5, "pos", "neg"),
+                   levels = c("neg","pos"))
+cm05     <- caret::confusionMatrix(pred05, preds_xgb_avg$obs, positive = "pos")
+
+thr_best <- as.numeric(pROC::coords(roc_xgb, "best", best.method = "youden", ret = "threshold"))
+predB    <- factor(ifelse(preds_xgb_avg$p_pos >= thr_best, "pos", "neg"),
+                   levels = c("neg","pos"))
+cmB      <- caret::confusionMatrix(predB, preds_xgb_avg$obs, positive = "pos")
+
+list(
+  AUC_por_imputacion = aucs_xgb,
+  AUC_CV_media = mean_auc_xgb, AUC_CV_sd = sd_auc_xgb,
+  AUC_agregada = auc_xgb,
+  corte_0_5 = cm05$byClass[c("Sensitivity","Specificity")],
+  corte_Youden = c(umbral = thr_best, cmB$byClass[c("Sensitivity","Specificity")])
+)
+```
+
+```{r, eval=FALSE}
+# Normaliza por imputación (suma = 1) y promedia
+vi_all_norm_xgb <- dplyr::bind_rows(lapply(res_xgb, function(r){
+  vi <- r$vi                                  
+  s  <- sum(vi$Overall, na.rm = TRUE)
+  vi$Overall <- if (s > 0) vi$Overall / s else vi$Overall
+  vi
+}))
+
+vip_xgb <- vi_all_norm_xgb %>%
+  dplyr::group_by(variable) %>%
+  dplyr::summarise(imp_mean = mean(Overall, na.rm=TRUE),
+                   imp_sd   = sd(Overall,   na.rm=TRUE),
+                   .groups="drop") %>%
+  dplyr::arrange(dplyr::desc(imp_mean))
+
+png("importancia_xgboost", width = 15.92, height = 7.83,units = "cm", res = 300)
+bp <- barplot(vip_xgb$imp_mean, names.arg = vip_xgb$variable, las = 2,
+              ylab = "Importancia (media normalizada MI)",
+              ylim = c(0, max(vip_xgb$imp_mean + vip_xgb$imp_sd, na.rm=TRUE)*1.05))
+arrows(x0 = bp, y0 = vip_xgb$imp_mean - vip_xgb$imp_sd,
+       x1 = bp, y1 = vip_xgb$imp_mean + vip_xgb$imp_sd,
+       angle = 90, code = 3, length = 0.05)
+dev.off()
+```
+
+
+```{r}
+# “Mejores” hiperparámetros (consenso MI)
+
+best_tbl <- bind_rows(lapply(seq_along(res_xgb), function(i){
+  cbind(res_xgb[[i]]$fit$bestTune, imp = i, auc = res_xgb[[i]]$auc)
+}))
+
+best_summary <- best_tbl %>%
+  group_by(nrounds, max_depth, eta, gamma, colsample_bytree, min_child_weight, subsample) %>%
+  summarise(freq = n(), mean_auc = mean(auc), .groups = "drop") %>%
+  arrange(desc(freq), desc(mean_auc))
+
+best_summary
+
+```
+
+# Comparación de modelos
+
+```{r}
+# boxplots con el MISMO corte de Youden GLOBAL
+
+library(dplyr); library(purrr); library(tidyr); library(ggplot2); library(pROC); library(tibble); library(scales)
+
+to_posneg <- function(df){
+  y <- as.character(df$dummy_disposition)
+  y <- ifelse(y %in% c("1","Exoplaneta","pos"), "pos", "neg")
+  df$dummy_disposition <- factor(y, levels = c("neg","pos"))
+  df
+}
+
+obs_ref_logit <- datasets_con_pca[[1]] %>% to_posneg() %>% transmute(pl_name, obs = dummy_disposition)
+obs_ref_tree  <- datasets_completos[[1]] %>% to_posneg() %>% transmute(pl_name, obs = dummy_disposition)
+obs_ref_rf    <- datasets_rf[[1]]        %>% to_posneg() %>% transmute(pl_name, obs = dummy_disposition)
+obs_ref_xgb   <- datasets_xgb[[1]]       %>% to_posneg() %>% transmute(pl_name, obs = dummy_disposition)
+
+#Métricas GLOBALES (modo-informe): ROC sobre prob. media entre imputacionesç
+
+global_metrics_from_res <- function(res_model, obs_ref_df){
+  preds <- bind_rows(map(res_model, "preds"))
+  preds_avg <- preds %>%
+    group_by(pl_name) %>% summarise(p_pos = mean(p_pos), .groups = "drop") %>%
+    left_join(obs_ref_df, by = "pl_name") %>%
+    mutate(obs = factor(obs, levels = c("neg","pos")))
+  roc_g <- pROC::roc(preds_avg$obs, preds_avg$p_pos, levels = c("neg","pos"), direction = "<")
+  best  <- pROC::coords(roc_g, x = "best", best.method = "youden",
+                        ret = c("threshold","sensitivity","specificity"))
+  list(
+    thr_global  = as.numeric(best["threshold"]),
+    AUC_global  = as.numeric(pROC::auc(roc_g)),
+    Sens_global = as.numeric(best["sensitivity"]),
+    Spec_global = as.numeric(best["specificity"])
+  )
+}
+
+g_logit <- global_metrics_from_res(res_list, obs_ref_logit)
+g_tree  <- global_metrics_from_res(res,      obs_ref_tree)
+g_rf    <- global_metrics_from_res(res_rf,   obs_ref_rf)
+g_xgb   <- global_metrics_from_res(res_xgb,  obs_ref_xgb)
+
+globals_tbl <- tibble(
+  modelo      = c("Logística","Árbol","Random Forest","XGBoost"),
+  thr_global  = c(g_logit$thr_global,  g_tree$thr_global,  g_rf$thr_global,  g_xgb$thr_global),
+  AUC_global  = c(g_logit$AUC_global,  g_tree$AUC_global,  g_rf$AUC_global,  g_xgb$AUC_global),
+  Sens_global = c(g_logit$Sens_global, g_tree$Sens_global, g_rf$Sens_global, g_xgb$Sens_global),
+  Spec_global = c(g_logit$Spec_global, g_tree$Spec_global, g_rf$Spec_global, g_xgb$Spec_global)
+)
+
+#Métricas por imputación usando el MISMO umbral global
+
+metrics_fixed_thr <- function(res_model, thr_g){
+  map2_dfr(res_model, seq_along(res_model), function(obj, i){
+    d <- obj$preds %>% mutate(obs = factor(as.character(obs), levels = c("neg","pos")))
+    tb <- table(d$obs)
+    if (length(tb) < 2 || any(tb == 0)) return(NULL)
+
+    roc_i <- pROC::roc(d$obs, d$p_pos, levels = c("neg","pos"), direction = "<")
+    ss_g  <- pROC::coords(roc_i, x = thr_g, input = "threshold",
+                          ret = c("sensitivity","specificity"))
+    tibble(
+      imp  = i,
+      AUC  = as.numeric(pROC::auc(roc_i)),
+      Sens = as.numeric(ss_g["sensitivity"]),
+      Spec = as.numeric(ss_g["specificity"])
+    )
+  })
+}
+
+b_logit <- metrics_fixed_thr(res_list, g_logit$thr_global) %>% mutate(modelo = "Logística")
+b_tree  <- metrics_fixed_thr(res,      g_tree$thr_global)  %>% mutate(modelo = "Árbol")
+b_rf    <- metrics_fixed_thr(res_rf,   g_rf$thr_global)    %>% mutate(modelo = "Random Forest")
+b_xgb   <- metrics_fixed_thr(res_xgb,  g_xgb$thr_global)   %>% mutate(modelo = "XGBoost")
+
+df_box <- bind_rows(b_logit, b_tree, b_rf, b_xgb)
+
+# Plot bonito
+model_levels <- c("Árbol","Logística","Random Forest","XGBoost")
+
+tab_all <- df_box %>%
+  transmute(model = factor(modelo, levels = model_levels),
+            imp, AUC, Sens, Spec)
+
+long_imp <- tab_all %>%
+  pivot_longer(c(AUC, Sens, Spec), names_to = "Métrica", values_to = "Valor") %>%
+  mutate(Métrica = factor(Métrica, levels = c("AUC","Sens","Spec")))
+
+global_long <- globals_tbl %>%
+  dplyr::rename(model = modelo) %>%
+  dplyr::mutate(model = factor(model, levels = model_levels)) %>%
+  tidyr::pivot_longer(c(AUC_global, Sens_global, Spec_global),
+                      names_to = "Métrica", values_to = "hval") %>%
+  dplyr::mutate(
+    Métrica = as.character(Métrica),
+    Métrica = dplyr::recode(Métrica,
+      "AUC_global"  = "AUC",
+      "Sens_global" = "Sens",
+      "Spec_global" = "Spec"
+    ),
+    Métrica = factor(Métrica, levels = c("AUC","Sens","Spec"))
+  )
+
+p_box_bonito <- ggplot(long_imp, aes(x = model, y = Valor, fill = model)) +
+  geom_boxplot(width = 0.62, alpha = 0.80, outlier.shape = NA, linewidth = 0.5) +
+  geom_point(aes(color = model),
+             position = position_jitter(width = 0.10, height = 0),
+             size = 2.2, alpha = 0.85, show.legend = FALSE) +
+  facet_wrap(~ Métrica, scales = "free_y") +
+  scale_fill_brewer(palette = "Set2", guide = "none") +
+  scale_color_brewer(palette = "Set2", guide = "none") +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    x = NULL, y = NULL,
+    title = "Comparación por imputación"
+  ) +
+  theme_minimal(base_size = 13) + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+print(p_box_bonito)
+ggsave("boxplots_modelos_bonito.png", p_box_bonito, width = 10, height = 6, dpi = 300)
+
+```
+
+

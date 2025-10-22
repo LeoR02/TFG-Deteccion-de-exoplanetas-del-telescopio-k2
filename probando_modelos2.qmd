@@ -1,0 +1,303 @@
+---
+title: "Probando modelos II NO SE USA"
+author: "Leo Rodríguez"
+toc: true
+toc-depth: 4
+toc-location: left
+format: html
+editor: visual
+self-contained: true
+---
+
+# Librerias
+
+```{r, warning=FALSE, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(naniar) # análisis de valores perdidos
+library(randomForest)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(rattle)
+library(vcd)
+library(partykit)
+library(rpartScore)
+library(randomForest)
+library(OOBCurve)
+
+# Dado que los modelos que se van a crear pueden aprovechar los beneficios de la
+# paralelización, lo ponemos (si da problemas en tu ordenador, puedes obviarlo)
+library(doParallel)
+cluster <- makeCluster(detectCores()- 1)
+registerDoParallel(cluster)
+```
+
+# Carga de datos
+En este caso, cargamos los datos que nos quedan tras el análisis exploratorio primero
+
+```{r}
+load("data_modelos_conMissings.RData")
+str(data_modelos)
+```
+
+```{r}
+#lista de vbles continuas:
+listconti3 <- c( "pl_orbper", "pl_rade",
+"pl_tranmid_std", "pl_trandep", "pl_trandur", 
+ "st_teff", "st_rad", "st_mass", "st_met","st_logg", "sy_pm", "sy_pmra", "sy_pmdec", "sy_dist","sy_bmag", "sy_vmag", "sy_jmag", "sy_hmag", "sy_kmag", "sy_umag", 
+"sy_gmag", "sy_rmag", "sy_imag", "sy_zmag", "sy_w1mag", "sy_w2mag", 
+"sy_w3mag", "sy_w4mag", "sy_gaiamag", "sy_tmag", "sy_kepmag")
+
+#lista de vbles discretas;
+listdiscr3 <- setdiff(colnames(data_modelos), listconti3)
+
+#quitamos el nombre, lo consideramos una "key"
+listdiscr3 <- listdiscr3[listdiscr3 != "pl_name"]
+
+#quitamos la fecha de transito
+listdiscr3 <- listdiscr3[listdiscr3 != "fecha_transito"]
+#quitamos la st_spectype
+listdiscr3 <- listdiscr3[listdiscr3 != "st_spectype"]
+
+#quitamos la vble dependiente
+listdiscr3 <- listdiscr3[listdiscr3 != "dummy_disposition"]
+vble_dependiente <- "dummy_disposition"
+```
+
+## valores perdidos
+
+```{r}
+gg_miss_var(data_modelos, show_pct = T)
+```
+
+Como podemos ver, hay variables que tienen gran cantidad de valores perdidos, por tanto, para este caso en particular en el que probamos modelos para deducir hipótesis, vamos a imputar por la mediana en las variables continuas y con la moda para las categóricas
+
+## imputación
+
+```{r}
+
+#intersect(names(prueba_RF),listconti3)
+#setdiff(names(prueba_RF), listconti3)
+
+prueba_RF <- data_modelos
+prueba_RF$fecha_transito <- NULL
+prueba_RF$pl_name <- NULL
+prueba_RF$st_spectype <- NULL
+
+imputar_mediana <- function(x) { 
+x[is.na(x)] <- median(x, na.rm = TRUE) 
+return(x) 
+}
+
+prueba_RF[,listconti3] <- lapply(prueba_RF[,listconti3], imputar_mediana)
+summary(prueba_RF[,listconti3]) #comprobamos que ya no quedan valores NA
+
+
+for (col in names(prueba_RF[listdiscr3])) {
+  if (is.factor(prueba_RF[[col]])) {
+    moda <- names(sort(table(prueba_RF[[col]]), decreasing = TRUE))[1]
+    prueba_RF[[col]][is.na(prueba_RF[[col]])] <- moda
+  }
+}
+
+set.seed(345)
+trainIndex <- createDataPartition(prueba_RF$dummy_disposition, p=0.8, list=FALSE)
+data_clasif_train <- prueba_RF[trainIndex,]
+data_clasif_test <- prueba_RF[-trainIndex,]
+```
+
+# Modelo logístico
+
+## Solo con bandas fotométricas
+
+```{r}
+# Ajustar el modelo de regresión logística
+modelo_logistico <- glm(dummy_disposition ~ sy_umag+ sy_bmag+ sy_gmag+ sy_vmag+ sy_rmag+ sy_imag+
+sy_zmag+ sy_jmag+ sy_hmag+ 
+sy_kmag+ sy_w1mag+ sy_w2mag+ sy_w3mag+ sy_w4mag+ sy_gaiamag+ 
+sy_tmag+ sy_kepmag, data = prueba_RF, family = binomial)
+
+# Resumen del modelo
+summary(modelo_logistico)
+```
+```{r}
+# Predecir probabilidades
+probabilidades <- predict(modelo_logistico, type = "response")
+
+# Convertir probabilidades en clases (umbral de 0.5)
+predicciones <- ifelse(probabilidades > 0.5, 1, 0)
+
+# Matriz de confusión con tabla básica
+confusion_matrix <- table(Real = data_modelos$dummy_disposition, Predicho = predicciones)
+print(confusion_matrix)
+```
+
+```{r}
+# Crear el objeto ROC
+roc_obj <- roc(data_modelos$dummy_disposition, probabilidades)
+
+# Obtener el valor AUC
+auc(roc_obj)
+plot(roc_obj)
+```
+
+## solo con transición
+
+```{r}
+modelo_logistico2 <- glm(dummy_disposition ~ pl_trandep, data = prueba_RF, family = binomial)
+
+# Resumen del modelo
+summary(modelo_logistico2)
+```
+```{r}
+# Predecir probabilidades
+probabilidades2 <- predict(modelo_logistico2, type = "response")
+
+# Convertir probabilidades en clases (umbral de 0.5)
+predicciones2 <- ifelse(probabilidades2 > 0.5, 1, 0)
+
+# Matriz de confusión con tabla básica
+confusion_matrix2 <- table(Real = prueba_RF$dummy_disposition, Predicho = predicciones2)
+print(confusion_matrix2)
+```
+```{r}
+# Crear el objeto ROC
+roc_obj2 <- roc(prueba_RF$dummy_disposition, probabilidades2)
+
+# Obtener el valor AUC
+auc(roc_obj2)
+plot(roc_obj2)
+```
+
+## variables importantes
+
+```{r}
+modelo_logistico3 <- glm(dummy_disposition ~ pl_trandep + pl_orbper + pl_rade + st_rad + sy_kepmag + pl_tranmid_std+ sy_dist, data = prueba_RF, family = binomial)
+
+# Resumen del modelo
+summary(modelo_logistico3)
+```
+```{r}
+# Predecir probabilidades
+probabilidades3 <- predict(modelo_logistico3, type = "response")
+
+# Convertir probabilidades en clases (umbral de 0.5)
+predicciones3 <- ifelse(probabilidades3 > 0.5, 1, 0)
+
+# Matriz de confusión con tabla básica
+confusion_matrix3 <- table(Real = prueba_RF$dummy_disposition, Predicho = predicciones3)
+print(confusion_matrix3)
+```
+```{r}
+# Crear el objeto ROC
+roc_obj3 <- roc(prueba_RF$dummy_disposition, probabilidades3)
+
+# Obtener el valor AUC
+auc(roc_obj3)
+plot(roc_obj3)
+```
+
+# Random Forest
+
+:::{.calout-note}
+En el artículo original (Breiman, 2001) se propone usar para mtry 1/3 de las variables si el árbol es de regresión y $\sqrt{variables}$ si es de clasificación
+:::
+
+```{r}
+set.seed(12345)
+RFInicial<-randomForest(dummy_disposition~., data=data_clasif_train,
+nodesize=ceiling(0.05*nrow(data_clasif_train)))
+print(RFInicial)
+```
+```{r}
+barplot(t(RFInicial$importance)/sum(RFInicial$importance), las=2)
+t(RFInicial$importance)/sum(RFInicial$importance)
+```
+
+# Árboles de clasificación
+
+```{r}
+#hoja del 1%
+set.seed(12345)
+ modeloClasif1<-rpart(dummy_disposition~., data=data_clasif_train, method = "class",
+ minbucket=ceiling(0.01*nrow(data_clasif_train)),cp=0,
+ maxsurrogate = 0)
+ 
+ #hoja del 3%
+ set.seed(12345)
+ modeloClasif3<-rpart(dummy_disposition~., data=data_clasif_train, method = "class",
+ minbucket=ceiling(0.03*nrow(data_clasif_train)),cp=0,
+ maxsurrogate = 0)
+ 
+ #hoja del 5%
+ set.seed(12345)
+ modeloClasif5<-rpart(dummy_disposition~., data=data_clasif_train, method = "class",
+ minbucket=ceiling(0.05*nrow(data_clasif_train)),cp=0,
+ maxsurrogate = 0)
+ 
+ modelos<-list(modeloClasif1,modeloClasif3,modeloClasif5)
+ sapply(modelos,function(x) roc(data_clasif_train$dummy_disposition,
+ predict(x,data_clasif_train,type="prob")[,2], direction="<")$auc)
+```
+```{r}
+sapply(modelos,
+ function(x) roc(data_clasif_test$dummy_disposition,
+ predict(x,data_clasif_test,type="prob")[,2], direction="<")$auc)
+```
+
+:::{.callout-warning}
+POR QUÉ ME SALE MAS AUC EN EL TEST, NO TIENE SENTIDO NINGUNO
+:::
+
+## solo con bandas fotométricas
+
+```{r}
+#hoja del 1%
+set.seed(12345)
+ modeloClasif1<-rpart(dummy_disposition~sy_umag+ sy_bmag+ sy_gmag+ sy_vmag+ sy_rmag+ sy_imag+
+sy_zmag+ sy_jmag+ sy_hmag+ 
+sy_kmag+ sy_w1mag+ sy_w2mag+ sy_w3mag+ sy_w4mag+ sy_gaiamag+ 
+sy_tmag+ sy_kepmag, data=data_clasif_train, method = "class",
+ minbucket=ceiling(0.01*nrow(data_clasif_train)),cp=0,
+ maxsurrogate = 0)
+ 
+ #hoja del 3%
+ set.seed(12345)
+ modeloClasif3<-rpart(dummy_disposition~sy_umag+ sy_bmag+ sy_gmag+ sy_vmag+ sy_rmag+ sy_imag+
+sy_zmag+ sy_jmag+ sy_hmag+ 
+sy_kmag+ sy_w1mag+ sy_w2mag+ sy_w3mag+ sy_w4mag+ sy_gaiamag+ 
+sy_tmag+ sy_kepmag, data=data_clasif_train, method = "class",
+ minbucket=ceiling(0.03*nrow(data_clasif_train)),cp=0,
+ maxsurrogate = 0)
+ 
+ #hoja del 5%
+ set.seed(12345)
+ modeloClasif5<-rpart(dummy_disposition~sy_umag+ sy_bmag+ sy_gmag+ sy_vmag+ sy_rmag+ sy_imag+
+sy_zmag+ sy_jmag+ sy_hmag+ 
+sy_kmag+ sy_w1mag+ sy_w2mag+ sy_w3mag+ sy_w4mag+ sy_gaiamag+ 
+sy_tmag+ sy_kepmag, data=data_clasif_train, method = "class",
+ minbucket=ceiling(0.05*nrow(data_clasif_train)),cp=0,
+ maxsurrogate = 0)
+ 
+ modelos<-list(modeloClasif1,modeloClasif3,modeloClasif5)
+ sapply(modelos,function(x) roc(data_clasif_train$dummy_disposition,
+ predict(x,data_clasif_train,type="prob")[,2], direction="<")$auc)
+```
+```{r}
+sapply(modelos,
+ function(x) roc(data_clasif_test$dummy_disposition,
+ predict(x,data_clasif_test,type="prob")[,2], direction="<")$auc)
+sapply(modelos,function(x) sum(x$frame$var == "<leaf>"))
+```
+
+:::{.callout-note}
+Aqui si que sale menor el test, ofu que alivio
+pero sigo sin entender que pasa si pongo todas las variables
+:::
+
+```{r}
+rpart.plot(modeloClasif3,extra=105,nn=TRUE,tweak=1.2)
+```
+
