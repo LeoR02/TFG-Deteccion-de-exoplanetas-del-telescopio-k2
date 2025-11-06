@@ -14,4 +14,3 @@
 
 ## Datos
 Los datos provienen de **NASA Exoplanet Archive (K2 planets and candidates)**.  
-➡️ Instrucciones en `data/raw/README.md` para descargarlos y preparar `data/proc/`.
